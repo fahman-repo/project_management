@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.env
+backend/.env
+
+# Build outputs
+dist/
+dist-*/
+build/
+*/dist/
+
+# Test, tokens & session artifacts
+.playwright-mcp/
+*.token
+*.pm_token
+.pm_token
+*.session.json
+__session.json
+frontend/public/__session.json
+*.apitoken*
+
+# Uploads (preserve .gitkeep)
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
