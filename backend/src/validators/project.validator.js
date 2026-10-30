@@ -219,41 +219,169 @@ const saveAsTemplateSchema = z.object({
 /** Project expense category enum. */
 const expenseCategory = z.enum(['material', 'vendor', 'equipment', 'operational', 'labor', 'other']);
 
+/** Nullable task_id helper handling empty string and 'null' from multipart forms. */
+const nullableTaskId = z.preprocess((val) => {
+  if (val === '' || val === 'null' || val === 'undefined') return null;
+  return val;
+}, idParam.nullable().optional());
+
 /** GET /projects/:id/expenses */
 const listExpensesQuery = z.object({
   category: expenseCategory.optional(),
   task_id: z.union([idParam, z.literal('direct')]).optional(),
   search: z.string().trim().max(180).optional(),
+  status: z.enum(['pending', 'approved', 'rejected']).optional(),
 });
 
 /** POST /projects/:id/expenses */
 const createExpenseSchema = z.object({
-  task_id: idParam.nullable().optional(),
+  task_id: nullableTaskId,
   title: requiredString(180),
   category: expenseCategory.optional().default('other'),
-  amount: z.coerce.number().min(0).max(9999999999999),
+  amount: z.coerce.number().positive('Nominal pengeluaran harus lebih besar dari 0').max(9999999999999),
   expense_date: dateString,
   vendor_name: optionalString(150),
   receipt_note: optionalString(500),
 });
 
 /** PATCH /projects/:id/expenses/:expenseId */
-const updateExpenseSchema = z
+const updateExpenseSchema = z.object({
+  task_id: nullableTaskId,
+  title: requiredString(180).optional(),
+  category: expenseCategory.optional(),
+  amount: z.coerce.number().positive('Nominal pengeluaran harus lebih besar dari 0').max(9999999999999).optional(),
+  expense_date: dateString.optional(),
+  vendor_name: optionalString(150),
+  receipt_note: optionalString(500),
+});
+
+/** PATCH /projects/:id/expenses/:expenseId/status */
+const expenseStatusSchema = z
   .object({
-    task_id: idParam.nullable().optional(),
-    title: requiredString(180).optional(),
-    category: expenseCategory.optional(),
-    amount: z.coerce.number().min(0).max(9999999999999).optional(),
-    expense_date: dateString.optional(),
-    vendor_name: optionalString(150),
-    receipt_note: optionalString(500),
+    status: z.enum(['approved', 'rejected']),
+    rejection_reason: optionalString(500),
+  })
+  .superRefine((val, ctx) => {
+    if (val.status === 'rejected' && (!val.rejection_reason || !val.rejection_reason.trim())) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['rejection_reason'],
+        message: 'Alasan penolakan wajib diisi jika status ditolak',
+      });
+    }
+  });
+
+/** Route params for `/projects/:id/expenses/:expenseId`. */
+const expenseParams = z.object({ id: idParam, expenseId: idParam });
+
+/** Risk enums */
+const riskType = z.enum(['risk', 'issue']);
+const riskCategory = z.enum(['technical', 'schedule', 'budget', 'resource', 'scope', 'external', 'other']);
+const riskStatus = z.enum(['identified', 'analyzing', 'mitigating', 'monitoring', 'resolved', 'closed']);
+const riskSeverity = z.enum(['low', 'medium', 'high', 'critical']);
+const scale1to5 = z.coerce.number().int().min(1).max(5);
+
+/** Route params for `/projects/:id/risks/:riskId`. */
+const riskParams = z.object({ id: idParam, riskId: idParam });
+
+/** GET /projects/:id/risks query */
+const listRisksQuery = z.object({
+  type: riskType.optional(),
+  category: riskCategory.optional(),
+  severity: riskSeverity.optional(),
+  status: riskStatus.optional(),
+  owner_id: optionalNumber(z.number().int().positive()),
+  probability: scale1to5.optional(),
+  impact: scale1to5.optional(),
+  search: z.string().trim().max(180).optional(),
+});
+
+/** POST /projects/:id/risks body */
+const createRiskSchema = z.object({
+  type: riskType.optional().default('risk'),
+  title: requiredString(200),
+  description: optionalString(5000),
+  category: riskCategory.optional().default('technical'),
+  probability: scale1to5.optional().default(3),
+  impact: scale1to5.optional().default(3),
+  mitigation_plan: optionalString(5000),
+  contingency_plan: optionalString(5000),
+  status: riskStatus.optional().default('identified'),
+  owner_id: idParam.nullable().optional(),
+  linked_task_id: idParam.nullable().optional(),
+  target_date: optionalDateString,
+});
+
+/** PATCH /projects/:id/risks/:riskId body */
+const updateRiskSchema = z
+  .object({
+    type: riskType.optional(),
+    title: requiredString(200).optional(),
+    description: optionalString(5000),
+    category: riskCategory.optional(),
+    probability: scale1to5.optional(),
+    impact: scale1to5.optional(),
+    mitigation_plan: optionalString(5000),
+    contingency_plan: optionalString(5000),
+    status: riskStatus.optional(),
+    owner_id: idParam.nullable().optional(),
+    linked_task_id: idParam.nullable().optional(),
+    target_date: optionalDateString,
   })
   .refine((value) => Object.values(value).some((entry) => entry !== undefined), {
     message: 'Minimal satu field harus diisi',
   });
 
-/** Route params for `/projects/:id/expenses/:expenseId`. */
-const expenseParams = z.object({ id: idParam, expenseId: idParam });
+/** Document Enums */
+const documentCategory = z.enum(['charter', 'contract', 'mom', 'sop', 'technical', 'wiki', 'other']);
+const documentStatus = z.enum(['draft', 'review', 'published', 'final', 'archived']);
+
+/** Route params for documents */
+const documentParams = z.object({ id: idParam, docId: idParam });
+const documentVersionParams = z.object({ id: idParam, docId: idParam, versionId: idParam });
+
+/** GET /projects/:id/documents query */
+const listDocumentsQuery = z.object({
+  category: documentCategory.optional(),
+  status: documentStatus.optional(),
+  pinned: booleanish,
+  search: z.string().trim().max(180).optional(),
+});
+
+/** POST /projects/:id/documents body */
+const createDocumentSchema = z.object({
+  title: requiredString(200),
+  category: documentCategory.optional().default('wiki'),
+  status: documentStatus.optional().default('published'),
+  summary: optionalString(500),
+  content: optionalString(65535),
+  is_pinned: booleanish.default(false),
+  is_locked: booleanish.default(false),
+  change_note: optionalString(500),
+});
+
+/** PATCH /projects/:id/documents/:docId body */
+const updateDocumentSchema = z
+  .object({
+    title: requiredString(200).optional(),
+    category: documentCategory.optional(),
+    status: documentStatus.optional(),
+    summary: optionalString(500),
+    content: optionalString(65535),
+    is_pinned: booleanish,
+    is_locked: booleanish,
+    remove_file: booleanish,
+    change_note: optionalString(500),
+    create_new_version: booleanish,
+  })
+  .refine((value) => Object.values(value).some((entry) => entry !== undefined), {
+    message: 'Minimal satu field harus diisi',
+  });
+
+/** POST /projects/:id/documents/:docId/versions/:versionId/restore body */
+const restoreDocumentVersionSchema = z.object({
+  change_note: optionalString(500),
+});
 
 module.exports = {
   memberRole,
@@ -280,5 +408,22 @@ module.exports = {
   listExpensesQuery,
   createExpenseSchema,
   updateExpenseSchema,
+  expenseStatusSchema,
   expenseParams,
+  riskType,
+  riskCategory,
+  riskStatus,
+  riskSeverity,
+  riskParams,
+  listRisksQuery,
+  createRiskSchema,
+  updateRiskSchema,
+  documentCategory,
+  documentStatus,
+  documentParams,
+  documentVersionParams,
+  listDocumentsQuery,
+  createDocumentSchema,
+  updateDocumentSchema,
+  restoreDocumentVersionSchema,
 };

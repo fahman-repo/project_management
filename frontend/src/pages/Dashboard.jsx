@@ -263,6 +263,14 @@ export default function Dashboard() {
             <CardHeader
               title="Progress Project"
               description="Persentase penyelesaian tiap project"
+              action={
+                <Link
+                  to="/projects"
+                  className="text-xs font-medium text-brand-600 hover:text-brand-700 dark:text-brand-400"
+                >
+                  Buka Projects &rarr;
+                </Link>
+              }
             />
             <CardBody>
               {projectProgress.length === 0 ? (

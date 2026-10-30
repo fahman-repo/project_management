@@ -1,5 +1,8 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+const env = require('../config/env');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess, sendPaginated } = require('../utils/response');
 const ApiError = require('../utils/ApiError');
@@ -742,6 +745,33 @@ const saveAsTemplate = asyncHandler(async (req, res) => {
   return sendSuccess(res, template, 'Proyek berhasil disimpan sebagai template');
 });
 
+const RECEIPT_ALLOWED_MIMES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'application/pdf',
+]);
+
+function assertReceiptMime(file) {
+  if (!file) return;
+  if (!RECEIPT_ALLOWED_MIMES.has(file.mimetype)) {
+    removeUploadedFile(file.filename);
+    throw ApiError.badRequest('Format bukti tidak didukung. Gunakan JPG, PNG, WebP, atau PDF.');
+  }
+}
+
+function removeUploadedFile(filename) {
+  if (!filename) return;
+  try {
+    const filePath = path.join(env.UPLOAD_PATH, path.basename(filename));
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch (err) {
+    console.warn('[removeUploadedFile] Gagal menghapus file lampiran:', filename, err.message);
+  }
+}
+
 /**
  * GET /api/v1/projects/:id/expenses
  */
@@ -750,9 +780,9 @@ const listExpenses = asyncHandler(async (req, res) => {
   const project = await loadProject(id);
   await assertCanView(req.user, project.id);
 
-  const { category, task_id: taskId, search } = req.query;
+  const { category, task_id: taskId, search, status } = req.query;
   const [expenses, summaryByCategory, stats] = await Promise.all([
-    projectModel.listProjectExpenses(project.id, { category, taskId, search }),
+    projectModel.listProjectExpenses(project.id, { category, taskId, search, status }),
     projectModel.getExpenseSummaryByCategory(project.id),
     projectModel.getProjectStats(project.id),
   ]);
@@ -768,6 +798,8 @@ const listExpenses = asyncHandler(async (req, res) => {
         total_task_actual_cost: stats.total_task_actual_cost,
         total_direct_expenses: stats.total_direct_expenses,
         total_expenses: stats.total_expenses,
+        total_pending_expenses: stats.total_pending_expenses,
+        pending_expense_count: stats.pending_expense_count,
         actual_cost: stats.actual_cost,
         remaining_budget: stats.remaining_budget,
         budget_usage_percent: stats.budget_usage_percent,
@@ -783,28 +815,81 @@ const listExpenses = asyncHandler(async (req, res) => {
 const createExpense = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const project = await loadProject(id);
-  await assertCanManage(req.user, project.id);
+  await assertCanView(req.user, project.id);
 
-  const expenseId = await projectModel.createProjectExpense(project.id, req.body, req.user.id);
+  const canManage = await accessService.canManageProject(req.user, project.id);
+
+  if (req.file) {
+    assertReceiptMime(req.file);
+  } else if (!canManage) {
+    throw ApiError.badRequest('Bukti pengeluaran wajib diunggah');
+  }
+
+  const isApproved = canManage;
+  const status = isApproved ? 'approved' : 'pending';
+  const approvedBy = isApproved ? req.user.id : null;
+  const approvedAt = isApproved ? new Date() : null;
+
+  const expenseData = {
+    ...req.body,
+    status,
+    approved_by: approvedBy,
+    approved_at: approvedAt,
+    receipt_file: req.file ? req.file.filename : null,
+    receipt_original_name: req.file ? req.file.originalname : null,
+    receipt_mime_type: req.file ? req.file.mimetype : null,
+    receipt_size: req.file ? req.file.size : null,
+  };
+
+  const expenseId = await projectModel.createProjectExpense(project.id, expenseData, req.user.id);
   const expense = await projectModel.findExpenseById(expenseId);
+
+  const action = isApproved ? 'project.expense_created' : 'project.expense_submitted';
+  const desc = isApproved
+    ? `${req.user.name} mencatat pengeluaran "${expense.title}" sebesar Rp ${Number(expense.amount || 0).toLocaleString('id-ID')}`
+    : `${req.user.name} mengajukan klaim pengeluaran "${expense.title}" sebesar Rp ${Number(expense.amount || 0).toLocaleString('id-ID')}`;
 
   await activityService.record({
     userId: req.user.id,
     projectId: project.id,
-    action: 'project.expense_added',
+    action,
     entityType: 'project_expense',
     entityId: expenseId,
-    description: `${req.user.name} mencatat pengeluaran "${req.body.title}" sebesar Rp ${Number(req.body.amount || 0).toLocaleString('id-ID')}`,
-    metadata: { expenseId, amount: req.body.amount, category: req.body.category },
+    description: desc,
+    metadata: { expenseId, amount: expense.amount, category: expense.category, status },
   });
 
-  socketService.emitProjectEvent(project.id, 'project:expense_added', {
+  if (!isApproved) {
+    try {
+      const approverIds = await projectModel.listProjectApproverIds(project.id);
+      const recipientIds = approverIds.filter((uid) => Number(uid) !== Number(req.user.id));
+      if (recipientIds.length > 0) {
+        await notificationService.notify({
+          userId: recipientIds,
+          type: 'info',
+          title: 'Pengajuan Pengeluaran Baru',
+          message: `${req.user.name} mengajukan pengeluaran "${expense.title}" sebesar Rp ${Number(expense.amount || 0).toLocaleString('id-ID')} pada proyek ${project.name}`,
+          link: `/projects/${project.id}?tab=budget`,
+        });
+      }
+    } catch (err) {
+      console.warn('[createExpense] Notification warning:', err.message);
+    }
+  }
+
+  socketService.emitProjectEvent(project.id, 'project:expense_updated', {
     projectId: project.id,
     expense,
   });
 
   res.status(201);
-  return sendSuccess(res, expense, 'Pengeluaran proyek berhasil dicatat');
+  return sendSuccess(
+    res,
+    expense,
+    isApproved
+      ? 'Pengeluaran proyek berhasil dicatat'
+      : 'Pengajuan pengeluaran berhasil dikirim dan menunggu persetujuan'
+  );
 });
 
 /**
@@ -813,25 +898,86 @@ const createExpense = asyncHandler(async (req, res) => {
 const updateExpense = asyncHandler(async (req, res) => {
   const { id, expenseId } = req.params;
   const project = await loadProject(id);
-  await assertCanManage(req.user, project.id);
+  await assertCanView(req.user, project.id);
 
   const existing = await projectModel.findExpenseById(expenseId);
   if (!existing || Number(existing.project_id) !== Number(project.id)) {
+    if (req.file) removeUploadedFile(req.file.filename);
     throw ApiError.notFound('Pengeluaran tidak ditemukan');
   }
 
-  await projectModel.updateProjectExpense(project.id, expenseId, req.body);
+  const canManage = await accessService.canManageProject(req.user, project.id);
+  const isCreator = Number(existing.created_by) === Number(req.user.id);
+  const canEdit = canManage || (isCreator && ['pending', 'rejected'].includes(existing.status));
+
+  if (!canEdit) {
+    if (req.file) removeUploadedFile(req.file.filename);
+    throw ApiError.forbidden('Anda tidak memiliki izin untuk mengubah pengeluaran ini');
+  }
+
+  if (req.file) {
+    assertReceiptMime(req.file);
+  }
+
+  const payload = { ...req.body };
+
+  // Resubmission rule: if creator edits a rejected expense, transition it back to pending and reset approval metadata
+  let resubmitted = false;
+  if (!canManage && isCreator && existing.status === 'rejected') {
+    payload.status = 'pending';
+    payload.approved_by = null;
+    payload.approved_at = null;
+    payload.rejection_reason = null;
+    resubmitted = true;
+  } else if (canManage && existing.status === 'approved') {
+    payload.status = 'approved';
+  }
+
+  if (req.file) {
+    payload.receipt_file = req.file.filename;
+    payload.receipt_original_name = req.file.originalname;
+    payload.receipt_mime_type = req.file.mimetype;
+    payload.receipt_size = req.file.size;
+  }
+
+  await projectModel.updateProjectExpense(project.id, expenseId, payload);
+
+  // Clean up previous file if replaced
+  if (req.file && existing.receipt_file && existing.receipt_file !== req.file.filename) {
+    removeUploadedFile(existing.receipt_file);
+  }
+
   const expense = await projectModel.findExpenseById(expenseId);
 
   await activityService.record({
     userId: req.user.id,
     projectId: project.id,
-    action: 'project.expense_updated',
+    action: resubmitted ? 'project.expense_submitted' : 'project.expense_updated',
     entityType: 'project_expense',
     entityId: expenseId,
-    description: `${req.user.name} memperbarui pengeluaran "${expense.title}"`,
-    metadata: { expenseId },
+    description: resubmitted
+      ? `${req.user.name} mengajukan ulang pengeluaran "${expense.title}"`
+      : `${req.user.name} memperbarui pengeluaran "${expense.title}"`,
+    metadata: { expenseId, status: expense.status },
   });
+
+  if (resubmitted) {
+    try {
+      const approverIds = await projectModel.listProjectApproverIds(project.id);
+      const recipientIds = approverIds.filter((uid) => Number(uid) !== Number(req.user.id));
+      if (recipientIds.length > 0) {
+        await notificationService.notify({
+          userId: recipientIds,
+          type: 'info',
+          title: 'Pengajuan Ulang Pengeluaran',
+          message: `${req.user.name} memperbarui dan mengajukan ulang pengeluaran "${expense.title}" pada proyek ${project.name}`,
+          link: `/projects/${project.id}?tab=budget`,
+        });
+      }
+    } catch (err) {
+      console.warn('[updateExpense] Notification warning:', err.message);
+    }
+  }
 
   socketService.emitProjectEvent(project.id, 'project:expense_updated', {
     projectId: project.id,
@@ -842,9 +988,9 @@ const updateExpense = asyncHandler(async (req, res) => {
 });
 
 /**
- * DELETE /api/v1/projects/:id/expenses/:expenseId
+ * PATCH /api/v1/projects/:id/expenses/:expenseId/status
  */
-const deleteExpense = asyncHandler(async (req, res) => {
+const updateExpenseStatus = asyncHandler(async (req, res) => {
   const { id, expenseId } = req.params;
   const project = await loadProject(id);
   await assertCanManage(req.user, project.id);
@@ -854,7 +1000,91 @@ const deleteExpense = asyncHandler(async (req, res) => {
     throw ApiError.notFound('Pengeluaran tidak ditemukan');
   }
 
+  if (existing.status !== 'pending') {
+    throw ApiError.conflict('Pengeluaran sudah diproses sebelumnya');
+  }
+
+  const { status, rejection_reason } = req.body;
+  const isApproved = status === 'approved';
+  const approvedBy = isApproved ? req.user.id : null;
+  const approvedAt = isApproved ? new Date() : null;
+  const reason = !isApproved ? (rejection_reason || null) : null;
+
+  const affected = await projectModel.updateExpenseStatus(expenseId, {
+    status,
+    approved_by: approvedBy,
+    approved_at: approvedAt,
+    rejection_reason: reason,
+  });
+
+  if (!affected) {
+    throw ApiError.conflict('Pengeluaran telah diproses oleh approver lain');
+  }
+
+  const expense = await projectModel.findExpenseById(expenseId);
+
+  await activityService.record({
+    userId: req.user.id,
+    projectId: project.id,
+    action: isApproved ? 'project.expense_approved' : 'project.expense_rejected',
+    entityType: 'project_expense',
+    entityId: expenseId,
+    description: isApproved
+      ? `${req.user.name} menyetujui pengeluaran "${expense.title}" sebesar Rp ${Number(expense.amount || 0).toLocaleString('id-ID')}`
+      : `${req.user.name} menolak pengeluaran "${expense.title}" dengan alasan: ${reason}`,
+    metadata: { expenseId, status, rejection_reason: reason },
+  });
+
+  if (expense.created_by && Number(expense.created_by) !== Number(req.user.id)) {
+    try {
+      await notificationService.notify({
+        userId: expense.created_by,
+        type: isApproved ? 'success' : 'warning',
+        title: isApproved ? 'Pengeluaran Disetujui' : 'Pengeluaran Ditolak',
+        message: isApproved
+          ? `Pengeluaran "${expense.title}" sebesar Rp ${Number(expense.amount || 0).toLocaleString('id-ID')} telah disetujui`
+          : `Pengeluaran "${expense.title}" ditolak: ${reason}`,
+        link: `/projects/${project.id}?tab=budget`,
+      });
+    } catch (err) {
+      console.warn('[updateExpenseStatus] Notification warning:', err.message);
+    }
+  }
+
+  socketService.emitProjectEvent(project.id, 'project:expense_updated', {
+    projectId: project.id,
+    expense,
+  });
+
+  return sendSuccess(res, expense, isApproved ? 'Pengeluaran berhasil disetujui' : 'Pengeluaran telah ditolak');
+});
+
+/**
+ * DELETE /api/v1/projects/:id/expenses/:expenseId
+ */
+const deleteExpense = asyncHandler(async (req, res) => {
+  const { id, expenseId } = req.params;
+  const project = await loadProject(id);
+  await assertCanView(req.user, project.id);
+
+  const existing = await projectModel.findExpenseById(expenseId);
+  if (!existing || Number(existing.project_id) !== Number(project.id)) {
+    throw ApiError.notFound('Pengeluaran tidak ditemukan');
+  }
+
+  const canManage = await accessService.canManageProject(req.user, project.id);
+  const isCreator = Number(existing.created_by) === Number(req.user.id);
+  const canDelete = canManage || (isCreator && ['pending', 'rejected'].includes(existing.status));
+
+  if (!canDelete) {
+    throw ApiError.forbidden('Anda tidak memiliki izin untuk menghapus pengeluaran ini');
+  }
+
   await projectModel.deleteProjectExpense(project.id, expenseId);
+
+  if (existing.receipt_file) {
+    removeUploadedFile(existing.receipt_file);
+  }
 
   await activityService.record({
     userId: req.user.id,
@@ -870,8 +1100,511 @@ const deleteExpense = asyncHandler(async (req, res) => {
     projectId: project.id,
     expenseId: Number(expenseId),
   });
+  socketService.emitProjectEvent(project.id, 'project:expense_updated', {
+    projectId: project.id,
+  });
 
   return sendSuccess(res, null, 'Pengeluaran berhasil dihapus');
+});
+
+/**
+ * GET /api/v1/projects/:id/risks
+ */
+const listRisks = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const project = await loadProject(id);
+  await assertCanView(req.user, project.id);
+
+  const { type, category, severity, status, owner_id: ownerId, probability, impact, search } = req.query;
+  const [risks, summary, stats] = await Promise.all([
+    projectModel.listProjectRisks(project.id, { type, category, severity, status, ownerId, probability, impact, search }),
+    projectModel.getProjectRiskSummary(project.id),
+    projectModel.getProjectStats(project.id),
+  ]);
+
+  return sendSuccess(
+    res,
+    {
+      risks,
+      summary,
+      stats: {
+        risk_count: stats.risk_count,
+        open_risk_count: stats.open_risk_count,
+        critical_risk_count: stats.critical_risk_count,
+      },
+    },
+    'Berhasil memuat daftar risiko proyek'
+  );
+});
+
+/**
+ * POST /api/v1/projects/:id/risks
+ */
+const createRisk = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const project = await loadProject(id);
+  await assertCanView(req.user, project.id);
+
+  const riskId = await projectModel.createProjectRisk(project.id, req.body, req.user.id);
+  const risk = await projectModel.findRiskById(riskId);
+
+  await activityService.record({
+    userId: req.user.id,
+    projectId: project.id,
+    action: 'project.risk_created',
+    entityType: 'project_risk',
+    entityId: riskId,
+    description: `${req.user.name} mencatat ${risk.type === 'issue' ? 'masalah' : 'risiko'} [${risk.code}] "${risk.title}" (Tingkat: ${risk.severity})`,
+    metadata: { riskId, code: risk.code, type: risk.type, severity: risk.severity },
+  });
+
+  if (risk.owner_id && Number(risk.owner_id) !== Number(req.user.id)) {
+    await notificationService.notify({
+      userId: risk.owner_id,
+      type: 'warning',
+      title: 'Anda ditunjuk sebagai PIC Penanganan Risiko',
+      message: `${req.user.name} menunjuk Anda sebagai PIC ${risk.type === 'issue' ? 'masalah' : 'risiko'} [${risk.code}] "${risk.title}" pada proyek ${project.name}`,
+      link: `/projects/${project.id}?tab=risks`,
+    });
+  }
+
+  socketService.emitProjectEvent(project.id, 'project:risk_created', {
+    projectId: project.id,
+    risk,
+  });
+
+  res.status(201);
+  return sendSuccess(res, risk, 'Risiko proyek berhasil dicatat');
+});
+
+/**
+ * PATCH /api/v1/projects/:id/risks/:riskId
+ */
+const updateRisk = asyncHandler(async (req, res) => {
+  const { id, riskId } = req.params;
+  const project = await loadProject(id);
+  await assertCanView(req.user, project.id);
+
+  const existing = await projectModel.findRiskById(riskId);
+  if (!existing || Number(existing.project_id) !== Number(project.id)) {
+    throw ApiError.notFound('Risiko tidak ditemukan di proyek ini');
+  }
+
+  const canManage = await accessService.canManageProject(req.user, project.id);
+  const isOwner = Number(existing.owner_id) === Number(req.user.id);
+  const isCreator = Number(existing.created_by) === Number(req.user.id);
+
+  if (!canManage && !isOwner && !isCreator) {
+    throw ApiError.forbidden('Anda tidak memiliki izin untuk memperbarui risiko ini');
+  }
+
+  await projectModel.updateProjectRisk(project.id, riskId, req.body);
+  const updated = await projectModel.findRiskById(riskId);
+
+  await activityService.record({
+    userId: req.user.id,
+    projectId: project.id,
+    action: 'project.risk_updated',
+    entityType: 'project_risk',
+    entityId: Number(riskId),
+    description: `${req.user.name} memperbarui ${updated.type === 'issue' ? 'masalah' : 'risiko'} [${updated.code}] "${updated.title}" (Status: ${updated.status})`,
+    metadata: { riskId: Number(riskId), code: updated.code, status: updated.status },
+  });
+
+  if (
+    updated.owner_id &&
+    Number(updated.owner_id) !== Number(req.user.id) &&
+    Number(updated.owner_id) !== Number(existing.owner_id)
+  ) {
+    await notificationService.notify({
+      userId: updated.owner_id,
+      type: 'warning',
+      title: 'Penunjukan PIC Risiko',
+      message: `${req.user.name} menunjuk Anda sebagai PIC ${updated.type === 'issue' ? 'masalah' : 'risiko'} [${updated.code}] "${updated.title}" pada proyek ${project.name}`,
+      link: `/projects/${project.id}?tab=risks`,
+    });
+  }
+
+  socketService.emitProjectEvent(project.id, 'project:risk_updated', {
+    projectId: project.id,
+    risk: updated,
+  });
+
+  return sendSuccess(res, updated, 'Risiko berhasil diperbarui');
+});
+
+/**
+ * DELETE /api/v1/projects/:id/risks/:riskId
+ */
+const deleteRisk = asyncHandler(async (req, res) => {
+  const { id, riskId } = req.params;
+  const project = await loadProject(id);
+  await assertCanManage(req.user, project.id);
+
+  const existing = await projectModel.findRiskById(riskId);
+  if (!existing || Number(existing.project_id) !== Number(project.id)) {
+    throw ApiError.notFound('Risiko tidak ditemukan di proyek ini');
+  }
+
+  await projectModel.deleteProjectRisk(project.id, riskId);
+
+  await activityService.record({
+    userId: req.user.id,
+    projectId: project.id,
+    action: 'project.risk_deleted',
+    entityType: 'project_risk',
+    entityId: Number(riskId),
+    description: `${req.user.name} menghapus ${existing.type === 'issue' ? 'masalah' : 'risiko'} [${existing.code}] "${existing.title}"`,
+    metadata: { riskId: Number(riskId), code: existing.code },
+  });
+
+  socketService.emitProjectEvent(project.id, 'project:risk_deleted', {
+    projectId: project.id,
+    riskId: Number(riskId),
+  });
+
+  return sendSuccess(res, null, 'Risiko berhasil dihapus');
+});
+
+// ---------------------------------------------------------------------------
+// Project Documents, Wiki & Versioning
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract user IDs mentioned in text matching project candidates.
+ */
+function extractMentionedUserIds(text, candidates = [], currentUserId = null) {
+  if (!text || !candidates.length) return [];
+  const mentioned = new Set();
+  const bracketRegex = /@\[([^\]]+)\]/g;
+  let match;
+  while ((match = bracketRegex.exec(text)) !== null) {
+    const raw = match[1].trim().toLowerCase();
+    const found = candidates.find((c) => c.name.toLowerCase() === raw);
+    if (found && Number(found.id) !== Number(currentUserId)) {
+      mentioned.add(Number(found.id));
+    }
+  }
+  const tokenRegex = /(?:^|\s)@([a-zA-Z0-9._-]+)/g;
+  while ((match = tokenRegex.exec(text)) !== null) {
+    const raw = match[1].trim().toLowerCase();
+    const found = candidates.find((c) => {
+      const name = c.name.toLowerCase();
+      const dotName = name.replace(/\s+/g, '.');
+      const underscoreName = name.replace(/\s+/g, '_');
+      const firstName = name.split(' ')[0];
+      const emailPrefix = c.email ? c.email.split('@')[0].toLowerCase() : '';
+      return (
+        name === raw ||
+        dotName === raw ||
+        underscoreName === raw ||
+        firstName === raw ||
+        emailPrefix === raw
+      );
+    });
+    if (found && Number(found.id) !== Number(currentUserId)) {
+      mentioned.add(Number(found.id));
+    }
+  }
+  return [...mentioned];
+}
+
+/**
+ * GET /api/v1/projects/:id/documents
+ */
+const listDocuments = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const project = await loadProject(id);
+  await assertCanView(req.user, project.id);
+
+  const { category, status, search, pinned } = req.query;
+  const [documents, summary, stats] = await Promise.all([
+    projectModel.listProjectDocuments(project.id, { category, status, search, pinned }),
+    projectModel.getProjectDocumentSummary(project.id),
+    projectModel.getProjectStats(project.id),
+  ]);
+
+  return sendSuccess(
+    res,
+    {
+      documents,
+      summary,
+      stats: {
+        document_count: stats.document_count,
+      },
+    },
+    'Berhasil memuat dokumen proyek'
+  );
+});
+
+/**
+ * GET /api/v1/projects/:id/documents/:docId
+ */
+const getDocument = asyncHandler(async (req, res) => {
+  const { id, docId } = req.params;
+  const project = await loadProject(id);
+  await assertCanView(req.user, project.id);
+
+  const document = await projectModel.findDocumentById(docId);
+  if (!document || Number(document.project_id) !== Number(project.id)) {
+    throw ApiError.notFound('Dokumen tidak ditemukan di proyek ini');
+  }
+
+  const versions = await projectModel.listDocumentVersions(docId);
+
+  return sendSuccess(
+    res,
+    {
+      document,
+      versions,
+    },
+    'Berhasil memuat detail dokumen'
+  );
+});
+
+/**
+ * POST /api/v1/projects/:id/documents
+ */
+const createDocument = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const project = await loadProject(id);
+  await assertCanView(req.user, project.id);
+
+  if (!req.body.content && !req.file && !req.body.summary) {
+    if (req.file) removeUploadedFile(req.file.filename);
+    throw ApiError.badRequest('Dokumen harus memiliki isi konten (Markdown), ringkasan, atau file lampiran');
+  }
+
+  const canManage = await accessService.canManageProject(req.user, project.id);
+  const isPinned = canManage ? Boolean(req.body.is_pinned) : false;
+  const isLocked = canManage ? Boolean(req.body.is_locked) : false;
+
+  const docData = {
+    title: req.body.title,
+    category: req.body.category || 'wiki',
+    status: req.body.status || 'published',
+    summary: req.body.summary || null,
+    content: req.body.content || null,
+    file_name: req.file ? req.file.filename : null,
+    file_original_name: req.file ? req.file.originalname : null,
+    file_mime_type: req.file ? req.file.mimetype : null,
+    file_size: req.file ? req.file.size : null,
+    is_pinned: isPinned,
+    is_locked: isLocked,
+    change_note: req.body.change_note || 'Versi awal dokumen',
+  };
+
+  const docId = await projectModel.createProjectDocument(project.id, docData, req.user.id);
+  const document = await projectModel.findDocumentById(docId);
+
+  await activityService.record({
+    userId: req.user.id,
+    projectId: project.id,
+    action: 'project.document_created',
+    entityType: 'project_document',
+    entityId: docId,
+    description: `${req.user.name} membuat dokumen [${document.code}] "${document.title}" (Kategori: ${document.category})`,
+    metadata: { docId, code: document.code, category: document.category, version: 1 },
+  });
+
+  if (req.body.content) {
+    try {
+      const members = await projectModel.listMembers(project.id);
+      const candidates = members.map((m) => ({ id: m.user_id, name: m.name, email: m.email }));
+      const mentionedUserIds = extractMentionedUserIds(req.body.content, candidates, req.user.id);
+      for (const uid of mentionedUserIds) {
+        await notificationService.notify({
+          userId: uid,
+          type: 'mention',
+          title: 'Anda disebut dalam dokumen proyek',
+          message: `${req.user.name} menyebut Anda pada dokumen [${document.code}] "${document.title}"`,
+          link: `/projects/${project.id}?tab=documents&doc=${document.id}`,
+        });
+      }
+    } catch (err) {
+      console.warn('[createDocument] Mention notification warning:', err.message);
+    }
+  }
+
+  socketService.emitProjectEvent(project.id, 'project:document_created', {
+    projectId: project.id,
+    document,
+  });
+
+  res.status(201);
+  return sendSuccess(res, document, 'Dokumen proyek berhasil dibuat');
+});
+
+/**
+ * PATCH /api/v1/projects/:id/documents/:docId
+ */
+const updateDocument = asyncHandler(async (req, res) => {
+  const { id, docId } = req.params;
+  const project = await loadProject(id);
+  await assertCanView(req.user, project.id);
+
+  const existing = await projectModel.findDocumentById(docId);
+  if (!existing || Number(existing.project_id) !== Number(project.id)) {
+    if (req.file) removeUploadedFile(req.file.filename);
+    throw ApiError.notFound('Dokumen tidak ditemukan di proyek ini');
+  }
+
+  const canManage = await accessService.canManageProject(req.user, project.id);
+  if (existing.is_locked && !canManage) {
+    if (req.file) removeUploadedFile(req.file.filename);
+    throw ApiError.forbidden('Dokumen ini terkunci. Hanya manajer atau administrator proyek yang dapat mengubahnya');
+  }
+
+  const updateData = {
+    ...req.body,
+    is_pinned: canManage && req.body.is_pinned !== undefined ? req.body.is_pinned : existing.is_pinned,
+    is_locked: canManage && req.body.is_locked !== undefined ? req.body.is_locked : existing.is_locked,
+  };
+
+  if (req.file) {
+    updateData.file_name = req.file.filename;
+    updateData.file_original_name = req.file.originalname;
+    updateData.file_mime_type = req.file.mimetype;
+    updateData.file_size = req.file.size;
+  }
+
+  await projectModel.updateProjectDocument(project.id, docId, updateData, req.user.id);
+  const updated = await projectModel.findDocumentById(docId);
+
+  await activityService.record({
+    userId: req.user.id,
+    projectId: project.id,
+    action: 'project.document_updated',
+    entityType: 'project_document',
+    entityId: Number(docId),
+    description: `${req.user.name} memperbarui dokumen [${updated.code}] "${updated.title}" (Versi ${updated.current_version})`,
+    metadata: { docId: Number(docId), code: updated.code, version: updated.current_version },
+  });
+
+  if (req.body.content && req.body.content !== existing.content) {
+    try {
+      const members = await projectModel.listMembers(project.id);
+      const candidates = members.map((m) => ({ id: m.user_id, name: m.name, email: m.email }));
+      const mentionedUserIds = extractMentionedUserIds(req.body.content, candidates, req.user.id);
+      for (const uid of mentionedUserIds) {
+        await notificationService.notify({
+          userId: uid,
+          type: 'mention',
+          title: 'Anda disebut dalam pembaruan dokumen',
+          message: `${req.user.name} menyebut Anda pada dokumen [${updated.code}] "${updated.title}"`,
+          link: `/projects/${project.id}?tab=documents&doc=${updated.id}`,
+        });
+      }
+    } catch (err) {
+      console.warn('[updateDocument] Mention notification warning:', err.message);
+    }
+  }
+
+  socketService.emitProjectEvent(project.id, 'project:document_updated', {
+    projectId: project.id,
+    document: updated,
+  });
+
+  return sendSuccess(res, updated, 'Dokumen berhasil diperbarui');
+});
+
+/**
+ * POST /api/v1/projects/:id/documents/:docId/versions/:versionId/restore
+ */
+const restoreDocumentVersion = asyncHandler(async (req, res) => {
+  const { id, docId, versionId } = req.params;
+  const project = await loadProject(id);
+  await assertCanView(req.user, project.id);
+
+  const existing = await projectModel.findDocumentById(docId);
+  if (!existing || Number(existing.project_id) !== Number(project.id)) {
+    throw ApiError.notFound('Dokumen tidak ditemukan di proyek ini');
+  }
+
+  const canManage = await accessService.canManageProject(req.user, project.id);
+  if (existing.is_locked && !canManage) {
+    throw ApiError.forbidden('Dokumen ini terkunci. Hanya manajer atau administrator proyek yang dapat memulihkan versinya');
+  }
+
+  const targetVersion = await projectModel.findDocumentVersionById(docId, versionId);
+  if (!targetVersion) {
+    throw ApiError.notFound('Versi dokumen yang dipilih tidak ditemukan');
+  }
+
+  const nextVersion = await projectModel.restoreDocumentVersion(
+    project.id,
+    docId,
+    targetVersion,
+    req.body.change_note,
+    req.user.id
+  );
+
+  const restored = await projectModel.findDocumentById(docId);
+
+  await activityService.record({
+    userId: req.user.id,
+    projectId: project.id,
+    action: 'project.document_restored',
+    entityType: 'project_document',
+    entityId: Number(docId),
+    description: `${req.user.name} memulihkan dokumen [${restored.code}] "${restored.title}" ke versi v${targetVersion.version_number} (menjadi v${nextVersion})`,
+    metadata: { docId: Number(docId), code: restored.code, fromVersion: targetVersion.version_number, toVersion: nextVersion },
+  });
+
+  socketService.emitProjectEvent(project.id, 'project:document_updated', {
+    projectId: project.id,
+    document: restored,
+  });
+
+  return sendSuccess(
+    res,
+    restored,
+    `Dokumen berhasil dipulihkan ke versi v${targetVersion.version_number} (menjadi v${nextVersion})`
+  );
+});
+
+/**
+ * DELETE /api/v1/projects/:id/documents/:docId
+ */
+const deleteDocument = asyncHandler(async (req, res) => {
+  const { id, docId } = req.params;
+  const project = await loadProject(id);
+  await assertCanView(req.user, project.id);
+
+  const existing = await projectModel.findDocumentById(docId);
+  if (!existing || Number(existing.project_id) !== Number(project.id)) {
+    throw ApiError.notFound('Dokumen tidak ditemukan di proyek ini');
+  }
+
+  const canManage = await accessService.canManageProject(req.user, project.id);
+  const isCreator = Number(existing.created_by) === Number(req.user.id);
+  if (!canManage && (!isCreator || existing.is_locked)) {
+    throw ApiError.forbidden('Anda tidak memiliki izin untuk menghapus dokumen ini');
+  }
+
+  const { fileNames } = await projectModel.deleteProjectDocument(project.id, docId);
+
+  // Clean up stored files
+  for (const fn of fileNames) {
+    removeUploadedFile(fn);
+  }
+
+  await activityService.record({
+    userId: req.user.id,
+    projectId: project.id,
+    action: 'project.document_deleted',
+    entityType: 'project_document',
+    entityId: Number(docId),
+    description: `${req.user.name} menghapus dokumen [${existing.code}] "${existing.title}"`,
+    metadata: { docId: Number(docId), code: existing.code },
+  });
+
+  socketService.emitProjectEvent(project.id, 'project:document_deleted', {
+    projectId: project.id,
+    docId: Number(docId),
+  });
+
+  return sendSuccess(res, null, 'Dokumen berhasil dihapus');
 });
 
 module.exports = {
@@ -896,5 +1629,16 @@ module.exports = {
   listExpenses,
   createExpense,
   updateExpense,
+  updateExpenseStatus,
   deleteExpense,
+  listRisks,
+  createRisk,
+  updateRisk,
+  deleteRisk,
+  listDocuments,
+  getDocument,
+  createDocument,
+  updateDocument,
+  restoreDocumentVersion,
+  deleteDocument,
 };

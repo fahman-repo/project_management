@@ -24,7 +24,7 @@ const TITLES = {
 /**
  * Top application bar: mobile menu, breadcrumb, search, theme and profile.
  */
-export function Topbar({ onMenuClick, unreadCount = 0, realtimeConnected = true }) {
+export function Topbar({ onMenuClick, unreadCount = 0, realtimeConnected = true, onOpenCommandPalette }) {
   const location = useLocation();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
@@ -70,21 +70,18 @@ export function Topbar({ onMenuClick, unreadCount = 0, realtimeConnected = true 
         </span>
       </div>
 
-      {/* Global search */}
-      <div className="relative hidden md:block">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-        <input
-          type="search"
-          placeholder="Cari task, project..."
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              const value = event.currentTarget.value.trim();
-              if (value) navigate(`/tasks?search=${encodeURIComponent(value)}`);
-            }
-          }}
-          className="w-52 rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-sm text-slate-700 placeholder:text-slate-400 transition-colors focus:border-brand-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20 lg:w-64 dark:border-slate-700 dark:bg-slate-950/50 dark:text-slate-200 dark:focus:bg-slate-900"
-        />
-      </div>
+      {/* Global search trigger */}
+      <button
+        type="button"
+        onClick={onOpenCommandPalette}
+        className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-500 transition-colors hover:border-slate-300 hover:bg-white hover:text-slate-800 focus:outline-none focus:ring-2 focus:ring-brand-500/20 sm:w-52 lg:w-64 dark:border-slate-700 dark:bg-slate-950/50 dark:text-slate-400 dark:hover:border-slate-600 dark:hover:bg-slate-900 dark:hover:text-slate-200"
+      >
+        <Search className="h-4 w-4 shrink-0 text-slate-400" />
+        <span className="flex-1 text-left truncate">Cari project, task...</span>
+        <kbd className="hidden rounded bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 shadow-sm sm:inline-block dark:bg-slate-800 dark:text-slate-400">
+          Ctrl K
+        </kbd>
+      </button>
 
       {/* Theme toggle */}
       <IconButton

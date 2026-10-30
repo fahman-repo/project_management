@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS users (
   avatar        VARCHAR(255)  NULL,
   job_title     VARCHAR(120)  NULL,
   bio           TEXT          NULL,
+  weekly_capacity_hours DECIMAL(5,2) NOT NULL DEFAULT 40.00,
   is_active     TINYINT(1)    NOT NULL DEFAULT 1,
   last_login_at DATETIME      NULL,
   created_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -312,29 +313,75 @@ CREATE TABLE IF NOT EXISTS task_attachments (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
--- ---------------------------------------------------------------------------
--- project_expenses (itemized project/task expense ledger)
+-- project_expenses (itemized project/task expense ledger with receipt + approval)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS project_expenses (
-  id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  project_id   INT UNSIGNED NOT NULL,
-  task_id      INT UNSIGNED NULL,
-  title        VARCHAR(180) NOT NULL,
-  category     ENUM('material','vendor','equipment','operational','labor','other') NOT NULL DEFAULT 'other',
-  amount       DECIMAL(15,2) NOT NULL DEFAULT 0.00,
-  expense_date DATE NOT NULL,
-  vendor_name  VARCHAR(150) NULL,
-  receipt_note VARCHAR(500) NULL,
-  created_by   INT UNSIGNED NULL,
-  created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  id                    INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  project_id            INT UNSIGNED NOT NULL,
+  task_id               INT UNSIGNED NULL,
+  title                 VARCHAR(180) NOT NULL,
+  category              ENUM('material','vendor','equipment','operational','labor','other') NOT NULL DEFAULT 'other',
+  amount                DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  expense_date          DATE NOT NULL,
+  status                ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+  vendor_name           VARCHAR(150) NULL,
+  receipt_note          VARCHAR(500) NULL,
+  receipt_file          VARCHAR(255) NULL,
+  receipt_original_name VARCHAR(255) NULL,
+  receipt_mime_type     VARCHAR(120) NULL,
+  receipt_size          INT UNSIGNED NULL,
+  created_by            INT UNSIGNED NULL,
+  approved_by           INT UNSIGNED NULL,
+  approved_at           DATETIME NULL,
+  rejection_reason      VARCHAR(500) NULL,
+  created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_pe_project_date (project_id, expense_date),
+  KEY idx_pe_project_status (project_id, status),
   KEY idx_pe_task (task_id),
   KEY idx_pe_category (category),
   CONSTRAINT fk_pe_project FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
   CONSTRAINT fk_pe_task FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE SET NULL,
-  CONSTRAINT fk_pe_creator FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL
+  CONSTRAINT fk_pe_creator FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL,
+  CONSTRAINT fk_pe_approver FOREIGN KEY (approved_by) REFERENCES users (id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- project_risks (Risk & Issue Register per project)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS project_risks (
+  id               INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  project_id       INT UNSIGNED NOT NULL,
+  code             VARCHAR(30)  NOT NULL,
+  type             ENUM('risk','issue') NOT NULL DEFAULT 'risk',
+  title            VARCHAR(200) NOT NULL,
+  description      TEXT         NULL,
+  category         ENUM('technical','schedule','budget','resource','scope','external','other') NOT NULL DEFAULT 'technical',
+  probability      TINYINT UNSIGNED NOT NULL DEFAULT 3,
+  impact           TINYINT UNSIGNED NOT NULL DEFAULT 3,
+  risk_score       TINYINT UNSIGNED NOT NULL DEFAULT 9,
+  severity         ENUM('low','medium','high','critical') NOT NULL DEFAULT 'medium',
+  mitigation_plan  TEXT         NULL,
+  contingency_plan TEXT         NULL,
+  status           ENUM('identified','analyzing','mitigating','monitoring','resolved','closed') NOT NULL DEFAULT 'identified',
+  owner_id         INT UNSIGNED NULL,
+  linked_task_id   INT UNSIGNED NULL,
+  target_date      DATE         NULL,
+  resolved_at      DATETIME     NULL,
+  created_by       INT UNSIGNED NULL,
+  created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_pr_project_code (project_id, code),
+  KEY idx_pr_project_status (project_id, status),
+  KEY idx_pr_project_severity (project_id, severity),
+  KEY idx_pr_owner (owner_id),
+  KEY idx_pr_task (linked_task_id),
+  CONSTRAINT fk_pr_project FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
+  CONSTRAINT fk_pr_owner FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE SET NULL,
+  CONSTRAINT fk_pr_task FOREIGN KEY (linked_task_id) REFERENCES tasks (id) ON DELETE SET NULL,
+  CONSTRAINT fk_pr_creator FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
@@ -378,6 +425,103 @@ CREATE TABLE IF NOT EXISTS notifications (
   KEY idx_notif_user_read (user_id, is_read),
   KEY idx_notif_created (created_at),
   CONSTRAINT fk_notif_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- task_checklists (lightweight sub-item checklists inside a task)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS task_checklists (
+  id          INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  task_id     INT UNSIGNED NOT NULL,
+  title       VARCHAR(255) NOT NULL,
+  is_checked  TINYINT(1)   NOT NULL DEFAULT 0,
+  position    INT          NOT NULL DEFAULT 0,
+  created_by  INT UNSIGNED NULL,
+  created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_tc_task_pos (task_id, position),
+  CONSTRAINT fk_tc_task FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE,
+  CONSTRAINT fk_tc_creator FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- reminder_logs (idempotency log for H-3 and H-1 due date reminders)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS reminder_logs (
+  id            INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  entity_type   ENUM('task','milestone') NOT NULL,
+  entity_id     INT UNSIGNED NOT NULL,
+  user_id       INT UNSIGNED NOT NULL,
+  reminder_type ENUM('h_minus_3','h_minus_1') NOT NULL,
+  due_date      DATE NOT NULL,
+  email_sent    TINYINT(1) NOT NULL DEFAULT 0,
+  sent_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_reminder_once (entity_type, entity_id, user_id, reminder_type, due_date),
+  KEY idx_rl_sent_at (sent_at),
+  CONSTRAINT fk_rl_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- project_documents (Project-level Documents & Wiki master records)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS project_documents (
+  id                 INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  project_id         INT UNSIGNED NOT NULL,
+  code               VARCHAR(30)  NOT NULL,
+  title              VARCHAR(200) NOT NULL,
+  category           ENUM('charter','contract','mom','sop','technical','wiki','other') NOT NULL DEFAULT 'wiki',
+  status             ENUM('draft','review','published','final','archived') NOT NULL DEFAULT 'published',
+  summary            VARCHAR(500) NULL,
+  content            LONGTEXT     NULL,
+  file_name          VARCHAR(255) NULL,
+  file_original_name VARCHAR(255) NULL,
+  file_mime_type     VARCHAR(120) NULL,
+  file_size          INT UNSIGNED NULL,
+  current_version    INT UNSIGNED NOT NULL DEFAULT 1,
+  is_pinned          TINYINT(1)   NOT NULL DEFAULT 0,
+  is_locked          TINYINT(1)   NOT NULL DEFAULT 0,
+  created_by         INT UNSIGNED NULL,
+  updated_by         INT UNSIGNED NULL,
+  created_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_pd_project_code (project_id, code),
+  KEY idx_pd_project_cat (project_id, category),
+  KEY idx_pd_project_status (project_id, status),
+  KEY idx_pd_project_pinned (project_id, is_pinned),
+  KEY idx_pd_creator (created_by),
+  KEY idx_pd_updater (updated_by),
+  CONSTRAINT fk_pd_project FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
+  CONSTRAINT fk_pd_creator FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL,
+  CONSTRAINT fk_pd_updater FOREIGN KEY (updated_by) REFERENCES users (id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- project_document_versions (Version history snapshots for project_documents)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS project_document_versions (
+  id                 INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  document_id        INT UNSIGNED NOT NULL,
+  project_id         INT UNSIGNED NOT NULL,
+  version_number     INT UNSIGNED NOT NULL DEFAULT 1,
+  title              VARCHAR(200) NOT NULL,
+  content            LONGTEXT     NULL,
+  file_name          VARCHAR(255) NULL,
+  file_original_name VARCHAR(255) NULL,
+  file_mime_type     VARCHAR(120) NULL,
+  file_size          INT UNSIGNED NULL,
+  change_note        VARCHAR(500) NULL,
+  created_by         INT UNSIGNED NULL,
+  created_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_pdv_doc_version (document_id, version_number),
+  KEY idx_pdv_project (project_id),
+  KEY idx_pdv_creator (created_by),
+  CONSTRAINT fk_pdv_document FOREIGN KEY (document_id) REFERENCES project_documents (id) ON DELETE CASCADE,
+  CONSTRAINT fk_pdv_project FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
+  CONSTRAINT fk_pdv_creator FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 SET FOREIGN_KEY_CHECKS = 1;

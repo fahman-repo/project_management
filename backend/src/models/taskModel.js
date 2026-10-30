@@ -58,6 +58,8 @@ const ENRICHED_SELECT = `SELECT ${TASK_FIELDS},
        (SELECT COUNT(*) FROM task_attachments ta WHERE ta.task_id = t.id) AS attachment_count,
        (SELECT COUNT(*) FROM tasks st WHERE st.parent_id = t.id) AS subtask_count,
        (SELECT COUNT(*) FROM tasks st WHERE st.parent_id = t.id AND st.status = 'done') AS subtask_done_count,
+       (SELECT COUNT(*) FROM task_checklists tck WHERE tck.task_id = t.id) AS checklist_count,
+       (SELECT COUNT(*) FROM task_checklists tck WHERE tck.task_id = t.id AND tck.is_checked = 1) AS checklist_done_count,
        (SELECT COUNT(*) FROM task_dependencies td WHERE td.task_id = t.id) AS dependency_count
        ${ENRICHED_FROM}`;
 
@@ -874,6 +876,111 @@ async function getGanttData(projectId) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Checklists
+// ---------------------------------------------------------------------------
+
+/**
+ * Checklists belonging to a task, ordered by position.
+ * @param {number} taskId
+ */
+async function listChecklists(taskId) {
+  const rows = await query(
+    `SELECT c.id, c.task_id, c.title, c.is_checked, c.position, c.created_by, c.created_at, c.updated_at,
+            u.name AS creator_name
+       FROM task_checklists c
+       LEFT JOIN users u ON u.id = c.created_by
+      WHERE c.task_id = ?
+      ORDER BY c.position ASC, c.id ASC`,
+    [taskId]
+  );
+  return rows.map((r) => ({
+    ...r,
+    is_checked: Boolean(r.is_checked),
+    position: Number(r.position),
+  }));
+}
+
+/**
+ * @param {number} id
+ */
+async function findChecklistById(id) {
+  const row = await queryOne(
+    `SELECT id, task_id, title, is_checked, position, created_by, created_at, updated_at
+       FROM task_checklists WHERE id = ? LIMIT 1`,
+    [id]
+  );
+  if (!row) return null;
+  return {
+    ...row,
+    is_checked: Boolean(row.is_checked),
+    position: Number(row.position),
+  };
+}
+
+/**
+ * @param {number} taskId
+ */
+async function getMaxChecklistPosition(taskId) {
+  const row = await queryOne(
+    'SELECT COALESCE(MAX(position), -1) AS max_pos FROM task_checklists WHERE task_id = ?',
+    [taskId]
+  );
+  return Number(row?.max_pos ?? -1);
+}
+
+/**
+ * @param {{task_id:number, title:string, position?:number, created_by?:number|null}} data
+ */
+async function createChecklist(data) {
+  const { task_id, title, position = 0, created_by = null } = data;
+  const result = await execute(
+    `INSERT INTO task_checklists (task_id, title, position, created_by)
+     VALUES (?, ?, ?, ?)`,
+    [task_id, title, position, created_by]
+  );
+  return result.insertId;
+}
+
+/**
+ * @param {number} id
+ * @param {{title?:string, is_checked?:boolean, position?:number}} data
+ */
+async function updateChecklist(id, data) {
+  const fields = [];
+  const params = [];
+
+  if (data.title !== undefined) {
+    fields.push('title = ?');
+    params.push(data.title);
+  }
+  if (data.is_checked !== undefined) {
+    fields.push('is_checked = ?');
+    params.push(data.is_checked ? 1 : 0);
+  }
+  if (data.position !== undefined) {
+    fields.push('position = ?');
+    params.push(data.position);
+  }
+
+  if (!fields.length) return 0;
+  params.push(id);
+
+  const result = await execute(
+    `UPDATE task_checklists SET ${fields.join(', ')} WHERE id = ?`,
+    params
+  );
+  return result.affectedRows;
+}
+
+/**
+ * @param {number} id
+ */
+async function deleteChecklist(id) {
+  const result = await execute('DELETE FROM task_checklists WHERE id = ?', [id]);
+  return result.affectedRows;
+}
+
 module.exports = {
   // tasks
   listTasks,
@@ -919,4 +1026,11 @@ module.exports = {
   deleteDependency,
   isReachable,
   listBlockedByEdges,
+  // checklists
+  listChecklists,
+  findChecklistById,
+  getMaxChecklistPosition,
+  createChecklist,
+  updateChecklist,
+  deleteChecklist,
 };

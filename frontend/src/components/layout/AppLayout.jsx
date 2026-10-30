@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import api from '../../api/client';
 import { Sidebar } from './Sidebar';
 import { Topbar } from './Topbar';
+import { CommandPalette } from '../shared/CommandPalette';
 import { useRealtimeInvalidate } from '../../hooks/useRealtimeInvalidate';
 import { useAuthStore } from '../../store/authStore';
 
@@ -14,6 +15,7 @@ const SIDEBAR_KEY = 'pm-sidebar-collapsed';
  */
 export function AppLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(() => {
     try {
       return localStorage.getItem(SIDEBAR_KEY) === 'true';
@@ -71,6 +73,18 @@ export function AppLayout() {
     return () => unsubscribe();
   }, [queryClient]);
 
+  // Keyboard shortcut Ctrl+K / Cmd+K to open Command Palette
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setCommandPaletteOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   return (
     <div className="flex h-full bg-slate-50 dark:bg-slate-950">
       <Sidebar
@@ -90,6 +104,7 @@ export function AppLayout() {
           onMenuClick={() => setMobileOpen(true)}
           unreadCount={unreadCount}
           realtimeConnected={connected}
+          onOpenCommandPalette={() => setCommandPaletteOpen(true)}
         />
 
         <main className="flex-1 overflow-y-auto">
@@ -98,6 +113,11 @@ export function AppLayout() {
           </div>
         </main>
       </div>
+
+      <CommandPalette
+        open={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+      />
     </div>
   );
 }

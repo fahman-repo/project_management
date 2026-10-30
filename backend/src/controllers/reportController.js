@@ -8,6 +8,7 @@ const ApiError = require('../utils/ApiError');
 const { accessibleProjectIds } = require('../services/accessService');
 const { inPlaceholders } = require('../models/base');
 const { TASK_STATUS, PROJECT_STATUS } = require('../config/constants');
+const { computeTaskProgressMap } = require('../services/progressService');
 
 /**
  * Build a project-access restriction.
@@ -34,9 +35,17 @@ function percentage(part, total) {
  */
 const getOverview = asyncHandler(async (req, res) => {
   const projectIds = await accessibleProjectIds(req.user);
+  const { project_id: projectId } = req.query;
+
+  if (projectId && projectIds !== null && !projectIds.includes(Number(projectId))) {
+    throw ApiError.forbidden('Anda tidak memiliki akses ke proyek ini');
+  }
+
+  const effectiveProjectIds = projectId ? [Number(projectId)] : projectIds;
   const today = dayjs().format('YYYY-MM-DD');
-  const projectFilter = projectScope(projectIds, 'p.id');
-  const taskFilter = projectScope(projectIds, 't.project_id');
+  const projectFilter = projectScope(effectiveProjectIds, 'p.id');
+  const taskFilter = projectScope(effectiveProjectIds, 't.project_id');
+  const expenseFilter = projectScope(effectiveProjectIds, 'pe.project_id');
 
   const [projectRow, taskRow, memberRows, labelRows, statusRows, projectRows, financialRow] = await Promise.all([
     query(
@@ -96,7 +105,7 @@ const getOverview = asyncHandler(async (req, res) => {
     query(
       `SELECT p.id, p.code, p.name, p.status, p.progress, p.color, p.budget,
               ((SELECT IFNULL(SUM(t_ac.actual_cost), 0) FROM tasks t_ac WHERE t_ac.project_id = p.id) +
-               (SELECT IFNULL(SUM(pe_dir.amount), 0) FROM project_expenses pe_dir WHERE pe_dir.project_id = p.id AND pe_dir.task_id IS NULL)) AS actual_cost,
+               (SELECT IFNULL(SUM(pe_dir.amount), 0) FROM project_expenses pe_dir WHERE pe_dir.project_id = p.id AND pe_dir.task_id IS NULL AND pe_dir.status = 'approved')) AS actual_cost,
               COUNT(t.id) AS task_count,
               COALESCE(SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END), 0) AS completed_count
          FROM projects p
@@ -111,10 +120,10 @@ const getOverview = asyncHandler(async (req, res) => {
          COALESCE(SUM(p.budget), 0) AS total_budget,
          (SELECT COALESCE(SUM(t.estimated_cost), 0) FROM tasks t WHERE ${taskFilter.sql}) AS total_estimated_cost,
          (SELECT COALESCE(SUM(t.actual_cost), 0) FROM tasks t WHERE ${taskFilter.sql}) AS total_task_actual_cost,
-         (SELECT COALESCE(SUM(pe.amount), 0) FROM project_expenses pe WHERE ${projectScope(projectIds, 'pe.project_id').sql} AND pe.task_id IS NULL) AS total_direct_expenses
+         (SELECT COALESCE(SUM(pe.amount), 0) FROM project_expenses pe WHERE ${expenseFilter.sql} AND pe.task_id IS NULL AND pe.status = 'approved') AS total_direct_expenses
        FROM projects p
       WHERE ${projectFilter.sql}`,
-      [...taskFilter.params, ...taskFilter.params, ...projectScope(projectIds, 'pe.project_id').params, ...projectFilter.params]
+      [...taskFilter.params, ...taskFilter.params, ...expenseFilter.params, ...projectFilter.params]
     ),
   ]);
 
@@ -599,11 +608,599 @@ const exportReport = asyncHandler(async (req, res) => {
   return res.status(200).send(csv);
 });
 
+/**
+ * Compute S-Curve & EVM time series and summary indices for a single project.
+ *
+ * @param {number} projectId
+ * @param {object} [options]
+ * @param {string} [options.from]
+ * @param {string} [options.to]
+ * @param {'daily'|'weekly'} [options.interval]
+ */
+async function computeProjectEvmData(projectId, options = {}) {
+  const { from, to, interval = 'daily' } = options;
+
+  const projectRows = await query(
+    `SELECT id, code, name, status, progress, budget, start_date, end_date
+       FROM projects
+      WHERE id = ?
+      LIMIT 1`,
+    [Number(projectId)]
+  );
+  const project = projectRows[0];
+  if (!project) throw ApiError.notFound('Proyek tidak ditemukan');
+
+  const [rawTasks, directExpenses] = await Promise.all([
+    query(
+      `SELECT t.id, t.parent_id, t.title, t.status, t.priority, t.progress,
+              t.start_date, t.due_date, t.created_at, t.completed_at, t.updated_at,
+              t.estimated_hours, t.estimated_cost, t.actual_cost,
+              COALESCE(ps.progress, 0) AS status_progress,
+              COALESCE(ps.category, '') AS status_category
+         FROM tasks t
+         LEFT JOIN project_statuses ps ON ps.project_id = t.project_id AND ps.key_name = t.status
+        WHERE t.project_id = ?
+        ORDER BY t.start_date ASC, t.id ASC`,
+      [Number(projectId)]
+    ),
+    query(
+      `SELECT id, amount, expense_date
+         FROM project_expenses
+        WHERE project_id = ? AND task_id IS NULL AND status = 'approved'
+        ORDER BY expense_date ASC`,
+      [Number(projectId)]
+    ),
+  ]);
+
+  const progressMap = computeTaskProgressMap(rawTasks);
+  const today = dayjs().format('YYYY-MM-DD');
+
+  const totalTaskEstimatedCost = rawTasks.reduce((sum, t) => sum + (Number(t.estimated_cost) || 0), 0);
+  const projectBudget = Number(project.budget) || 0;
+  const totalHours = rawTasks.reduce((sum, t) => sum + (Number(t.estimated_hours) || 0), 0);
+  const hasCostBaseline = totalTaskEstimatedCost > 0;
+
+  // Determine Budget at Completion (BAC) and baseline value per task
+  let bac = 0;
+  if (hasCostBaseline) {
+    bac = totalTaskEstimatedCost;
+  } else if (projectBudget > 0) {
+    bac = projectBudget;
+  } else if (totalHours > 0) {
+    bac = totalHours;
+  } else {
+    bac = rawTasks.length > 0 ? rawTasks.length * 100 : 100;
+  }
+
+  // Find min/max dates across tasks and project
+  let earliestDate = project.start_date ? dayjs(project.start_date).format('YYYY-MM-DD') : null;
+  let latestDate = project.end_date ? dayjs(project.end_date).format('YYYY-MM-DD') : null;
+
+  for (const t of rawTasks) {
+    const tStart = t.start_date ? dayjs(t.start_date).format('YYYY-MM-DD') : dayjs(t.created_at).format('YYYY-MM-DD');
+    const tDue = t.due_date ? dayjs(t.due_date).format('YYYY-MM-DD') : null;
+    if (!earliestDate || dayjs(tStart).isBefore(dayjs(earliestDate))) earliestDate = tStart;
+    if (tDue && (!latestDate || dayjs(tDue).isAfter(dayjs(latestDate)))) latestDate = tDue;
+  }
+
+  const startDate = from || earliestDate || today;
+  let endDate = to || latestDate || dayjs(startDate).add(30, 'day').format('YYYY-MM-DD');
+  if (dayjs(endDate).isBefore(dayjs(startDate))) {
+    endDate = dayjs(startDate).add(30, 'day').format('YYYY-MM-DD');
+  }
+
+  // Prepare normalized task objects
+  const tasks = rawTasks.map((t) => {
+    let baselineValue = 0;
+    if (hasCostBaseline) {
+      baselineValue = Number(t.estimated_cost) || 0;
+    } else if (projectBudget > 0) {
+      if (totalHours > 0) {
+        baselineValue = Math.round(((Number(t.estimated_hours) || 0) / totalHours) * projectBudget);
+      } else {
+        baselineValue = rawTasks.length > 0 ? Math.round(projectBudget / rawTasks.length) : 0;
+      }
+    } else if (totalHours > 0) {
+      baselineValue = Number(t.estimated_hours) || 0;
+    } else {
+      baselineValue = 100;
+    }
+
+    const tStart = t.start_date
+      ? dayjs(t.start_date).format('YYYY-MM-DD')
+      : dayjs(t.created_at).format('YYYY-MM-DD');
+    const tDue = t.due_date
+      ? dayjs(t.due_date).format('YYYY-MM-DD')
+      : endDate;
+    const taskStart = dayjs(tStart).isBefore(dayjs(startDate)) ? startDate : tStart;
+    let taskDue = dayjs(tDue).isAfter(dayjs(endDate)) ? endDate : tDue;
+    if (dayjs(taskDue).isBefore(dayjs(taskStart))) taskDue = taskStart;
+
+    const durationDays = Math.max(1, dayjs(taskDue).diff(dayjs(taskStart), 'day') + 1);
+    const resolvedProgress = Math.min(100, Math.max(0, (progressMap.get(t.id) ?? Number(t.progress)) || 0));
+    const completedAt = t.completed_at ? dayjs(t.completed_at).format('YYYY-MM-DD') : null;
+    const actualCost = Number(t.actual_cost) || 0;
+
+    return {
+      id: t.id,
+      title: t.title,
+      baselineValue,
+      taskStart,
+      taskDue,
+      durationDays,
+      progress: resolvedProgress,
+      completedAt,
+      actualCost,
+      status: t.status,
+    };
+  });
+
+  const totalDays = Math.max(0, dayjs(endDate).diff(dayjs(startDate), 'day'));
+  const dailyPoints = [];
+
+  for (let offset = 0; offset <= totalDays; offset += 1) {
+    const current = dayjs(startDate).add(offset, 'day');
+    const curDateStr = current.format('YYYY-MM-DD');
+    const isPastOrToday = !current.isAfter(dayjs(today), 'day');
+
+    // Planned Value on date current
+    let pv = 0;
+    for (const t of tasks) {
+      if (!current.isBefore(dayjs(t.taskStart), 'day')) {
+        if (!current.isBefore(dayjs(t.taskDue), 'day')) {
+          pv += t.baselineValue;
+        } else {
+          const daysPassed = current.diff(dayjs(t.taskStart), 'day') + 1;
+          pv += t.baselineValue * Math.min(1, Math.max(0, daysPassed / t.durationDays));
+        }
+      }
+    }
+
+    // Earned Value and Actual Cost only calculated up to today
+    let ev = null;
+    let ac = null;
+
+    if (isPastOrToday) {
+      ev = 0;
+      ac = 0;
+
+      // Sum task EV
+      for (const t of tasks) {
+        if (t.status === 'done' || t.completedAt || t.progress >= 100) {
+          const compDate = t.completedAt && !dayjs(t.completedAt).isAfter(dayjs(today))
+            ? t.completedAt
+            : curDateStr;
+          if (!current.isBefore(dayjs(t.taskStart), 'day')) {
+            if (!current.isBefore(dayjs(compDate), 'day')) {
+              ev += t.baselineValue;
+            } else {
+              const activeDur = Math.max(1, dayjs(compDate).diff(dayjs(t.taskStart), 'day') + 1);
+              const daysPassed = current.diff(dayjs(t.taskStart), 'day') + 1;
+              ev += t.baselineValue * Math.min(1, Math.max(0, daysPassed / activeDur));
+            }
+          }
+        } else if (t.progress > 0) {
+          const earnedSoFar = t.baselineValue * (t.progress / 100);
+          if (!current.isBefore(dayjs(t.taskStart), 'day')) {
+            if (!current.isBefore(dayjs(today), 'day')) {
+              ev += earnedSoFar;
+            } else {
+              const activeDur = Math.max(1, dayjs(today).diff(dayjs(t.taskStart), 'day') + 1);
+              const daysPassed = current.diff(dayjs(t.taskStart), 'day') + 1;
+              ev += earnedSoFar * Math.min(1, Math.max(0, daysPassed / activeDur));
+            }
+          }
+        }
+
+        // Sum task AC
+        if (t.actualCost > 0) {
+          const activeEnd = t.completedAt && !dayjs(t.completedAt).isAfter(dayjs(today))
+            ? t.completedAt
+            : today;
+          if (!current.isBefore(dayjs(t.taskStart), 'day')) {
+            if (!current.isBefore(dayjs(activeEnd), 'day')) {
+              ac += t.actualCost;
+            } else {
+              const activeDur = Math.max(1, dayjs(activeEnd).diff(dayjs(t.taskStart), 'day') + 1);
+              const daysPassed = current.diff(dayjs(t.taskStart), 'day') + 1;
+              ac += t.actualCost * Math.min(1, Math.max(0, daysPassed / activeDur));
+            }
+          }
+        }
+      }
+
+      // Sum direct approved expenses where expense_date <= current
+      for (const exp of directExpenses) {
+        if (!dayjs(exp.expense_date).isAfter(current, 'day')) {
+          ac += Number(exp.amount) || 0;
+        }
+      }
+
+      ev = Math.round(ev * 100) / 100;
+      ac = Math.round(ac * 100) / 100;
+    }
+
+    pv = Math.round(pv * 100) / 100;
+
+    dailyPoints.push({
+      date: curDateStr,
+      pv,
+      ev,
+      ac,
+      pvPercent: bac > 0 ? Math.round((pv / bac) * 1000) / 10 : 0,
+      evPercent: ev !== null && bac > 0 ? Math.round((ev / bac) * 1000) / 10 : null,
+      acPercent: ac !== null && bac > 0 ? Math.round((ac / bac) * 1000) / 10 : null,
+    });
+  }
+
+  // Sample or aggregate by weekly interval if requested
+  let series = dailyPoints;
+  if (interval === 'weekly' && dailyPoints.length > 14) {
+    const weeklyPoints = [];
+    const dateLookup = new Map();
+    dailyPoints.forEach((p) => dateLookup.set(p.date, p));
+
+    weeklyPoints.push(dailyPoints[0]);
+
+    for (let i = 7; i < dailyPoints.length - 1; i += 7) {
+      weeklyPoints.push(dailyPoints[i]);
+    }
+
+    const todayPoint = dateLookup.get(today);
+    if (todayPoint && !weeklyPoints.some((p) => p.date === today)) {
+      weeklyPoints.push(todayPoint);
+      weeklyPoints.sort((a, b) => a.date.localeCompare(b.date));
+    }
+
+    const lastPoint = dailyPoints[dailyPoints.length - 1];
+    if (!weeklyPoints.some((p) => p.date === lastPoint.date)) {
+      weeklyPoints.push(lastPoint);
+    }
+
+    series = weeklyPoints;
+  }
+
+  const statusDate = dayjs(today).isAfter(dayjs(endDate))
+    ? endDate
+    : dayjs(today).isBefore(dayjs(startDate))
+      ? startDate
+      : today;
+
+  const currentPvPoint = dailyPoints.find((p) => p.date === statusDate) || dailyPoints[dailyPoints.length - 1] || { pv: 0 };
+  const currentPv = Number(currentPvPoint?.pv || 0);
+
+  const currentEv = Math.round(
+    tasks.reduce((sum, t) => sum + t.baselineValue * (t.progress / 100), 0) * 100
+  ) / 100;
+
+  const directApprovedSum = directExpenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+  const taskAcSum = tasks.reduce((sum, t) => sum + t.actualCost, 0);
+  const currentAc = Math.round((taskAcSum + directApprovedSum) * 100) / 100;
+
+  const cv = Math.round((currentEv - currentAc) * 100) / 100;
+  const sv = Math.round((currentEv - currentPv) * 100) / 100;
+
+  const cpi = currentAc > 0 ? Math.round((currentEv / currentAc) * 100) / 100 : (currentEv > 0 ? 1 : null);
+  const spi = currentPv > 0 ? Math.round((currentEv / currentPv) * 100) / 100 : (currentEv > 0 ? 1 : null);
+
+  let eac = bac;
+  if (cpi && cpi > 0) {
+    eac = Math.round(bac / cpi);
+  } else {
+    eac = Math.round(currentAc + Math.max(0, bac - currentEv));
+  }
+
+  const etc = Math.max(0, eac - currentAc);
+  const vac = Math.round((bac - eac) * 100) / 100;
+
+  const summary = {
+    bac: Math.round(bac),
+    pv: currentPv,
+    ev: currentEv,
+    ac: currentAc,
+    cv,
+    sv,
+    cpi,
+    spi,
+    eac,
+    etc,
+    vac,
+    plannedProgress: bac > 0 ? Math.round((currentPv / bac) * 1000) / 10 : 0,
+    earnedProgress: bac > 0 ? Math.round((currentEv / bac) * 1000) / 10 : 0,
+    actualCostRate: bac > 0 ? Math.round((currentAc / bac) * 1000) / 10 : 0,
+    statusDate,
+    unit: hasCostBaseline || projectBudget > 0 ? 'currency' : 'weight',
+  };
+
+  return {
+    projectId: project.id,
+    projectCode: project.code,
+    projectName: project.name,
+    projectStatus: project.status,
+    startDate,
+    endDate,
+    interval,
+    summary,
+    series,
+  };
+}
+
+/**
+ * GET /api/v1/reports/evm
+ * S-Curve and EVM metrics for a single project.
+ */
+const getEvm = asyncHandler(async (req, res) => {
+  const projectIds = await accessibleProjectIds(req.user);
+  const { project_id: projectId, from, to, interval } = req.query;
+
+  if (projectIds !== null && !projectIds.includes(Number(projectId))) {
+    throw ApiError.forbidden('Anda tidak memiliki akses ke proyek ini');
+  }
+
+  const data = await computeProjectEvmData(Number(projectId), { from, to, interval });
+  return sendSuccess(res, data, 'Berhasil memuat data Kurva-S & EVM proyek');
+});
+
+/**
+ * GET /api/v1/reports/executive
+ * Complete executive status report data (KPI, budget summary, EVM, milestones, overdue tasks).
+ */
+const getExecutiveReport = asyncHandler(async (req, res) => {
+  const projectIds = await accessibleProjectIds(req.user);
+  const { project_id: projectId, from, to } = req.query;
+
+  if (projectId && projectIds !== null && !projectIds.includes(Number(projectId))) {
+    throw ApiError.forbidden('Anda tidak memiliki akses ke proyek ini');
+  }
+
+  const effectiveProjectIds = projectId ? [Number(projectId)] : projectIds;
+  const today = dayjs().format('YYYY-MM-DD');
+
+  const projectFilter = projectScope(effectiveProjectIds, 'p.id');
+  const taskFilter = projectScope(effectiveProjectIds, 't.project_id');
+  const milestoneFilter = projectScope(effectiveProjectIds, 'm.project_id');
+  const expenseFilter = projectScope(effectiveProjectIds, 'pe.project_id');
+
+  const [
+    projectRow,
+    taskRow,
+    financialRow,
+    milestoneRows,
+    overdueRows,
+    projectRows,
+    statusRows,
+  ] = await Promise.all([
+    query(
+      `SELECT COUNT(*) AS total,
+              COALESCE(SUM(CASE WHEN p.status = 'active' THEN 1 ELSE 0 END), 0) AS active,
+              COALESCE(SUM(CASE WHEN p.status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
+              COALESCE(SUM(CASE WHEN p.status = 'planning' THEN 1 ELSE 0 END), 0) AS planning,
+              COALESCE(SUM(CASE WHEN p.status = 'on_hold' THEN 1 ELSE 0 END), 0) AS on_hold,
+              AVG(p.progress) AS avg_progress
+         FROM projects p
+        WHERE ${projectFilter.sql}`,
+      projectFilter.params
+    ),
+    query(
+      `SELECT COUNT(*) AS total,
+              COALESCE(SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END), 0) AS done,
+              COALESCE(SUM(CASE WHEN t.status <> 'done' THEN 1 ELSE 0 END), 0) AS open_tasks,
+              COALESCE(SUM(CASE WHEN t.status <> 'done' AND t.due_date IS NOT NULL AND t.due_date < ?
+                             THEN 1 ELSE 0 END), 0) AS overdue,
+              COALESCE(SUM(CASE WHEN t.completed_at IS NOT NULL AND t.completed_at <= t.due_date
+                             THEN 1 ELSE 0 END), 0) AS on_time,
+              COALESCE(SUM(CASE WHEN t.completed_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS completed,
+              AVG(CASE WHEN t.completed_at IS NOT NULL
+                       THEN GREATEST(0, TIMESTAMPDIFF(DAY, t.created_at, t.completed_at)) END) AS avg_duration
+         FROM tasks t
+        WHERE ${taskFilter.sql}`,
+      [today, ...taskFilter.params]
+    ),
+    query(
+      `SELECT
+         COALESCE(SUM(p.budget), 0) AS total_budget,
+         (SELECT COALESCE(SUM(t.estimated_cost), 0) FROM tasks t WHERE ${taskFilter.sql}) AS total_estimated_cost,
+         (SELECT COALESCE(SUM(t.actual_cost), 0) FROM tasks t WHERE ${taskFilter.sql}) AS total_task_actual_cost,
+         (SELECT COALESCE(SUM(pe.amount), 0) FROM project_expenses pe WHERE ${expenseFilter.sql} AND pe.task_id IS NULL AND pe.status = 'approved') AS total_direct_expenses,
+         (SELECT COALESCE(SUM(pe.amount), 0) FROM project_expenses pe WHERE ${expenseFilter.sql} AND pe.status = 'pending') AS total_pending_expenses,
+         (SELECT COUNT(*) FROM project_expenses pe WHERE ${expenseFilter.sql} AND pe.status = 'pending') AS pending_expense_count
+       FROM projects p
+      WHERE ${projectFilter.sql}`,
+      [...taskFilter.params, ...taskFilter.params, ...expenseFilter.params, ...expenseFilter.params, ...expenseFilter.params, ...projectFilter.params]
+    ),
+    query(
+      `SELECT m.id, m.name, m.description, m.due_date, m.status, m.progress,
+              p.id AS project_id, p.code AS project_code, p.name AS project_name
+         FROM milestones m
+         JOIN projects p ON p.id = m.project_id
+        WHERE ${milestoneFilter.sql}
+        ORDER BY m.due_date IS NULL ASC, m.due_date ASC, m.id ASC
+        LIMIT 100`,
+      milestoneFilter.params
+    ),
+    query(
+      `SELECT t.id, t.title, t.priority, t.status, t.due_date, t.progress,
+              t.estimated_cost, t.actual_cost,
+              DATEDIFF(?, t.due_date) AS days_overdue,
+              p.id AS project_id, p.code AS project_code, p.name AS project_name,
+              u.name AS assignee_name, u.avatar AS assignee_avatar
+         FROM tasks t
+         JOIN projects p ON p.id = t.project_id
+         LEFT JOIN users u ON u.id = t.assignee_id
+        WHERE t.status <> 'done'
+          AND t.due_date IS NOT NULL
+          AND t.due_date < ?
+          AND ${taskFilter.sql}
+        ORDER BY t.due_date ASC
+        LIMIT 100`,
+      [today, today, ...taskFilter.params]
+    ),
+    query(
+      `SELECT p.id, p.code, p.name, p.status, p.priority, p.progress, p.color, p.budget,
+              p.start_date, p.end_date, u.name AS manager_name,
+              ((SELECT IFNULL(SUM(t_ac.actual_cost), 0) FROM tasks t_ac WHERE t_ac.project_id = p.id) +
+               (SELECT IFNULL(SUM(pe_dir.amount), 0) FROM project_expenses pe_dir WHERE pe_dir.project_id = p.id AND pe_dir.task_id IS NULL AND pe_dir.status = 'approved')) AS actual_cost,
+              (SELECT IFNULL(SUM(t_ec.estimated_cost), 0) FROM tasks t_ec WHERE t_ec.project_id = p.id) AS total_estimated_cost,
+              COUNT(t.id) AS task_count,
+              COALESCE(SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END), 0) AS completed_count
+         FROM projects p
+         LEFT JOIN users u ON u.id = p.manager_id
+         LEFT JOIN tasks t ON t.project_id = p.id
+        WHERE ${projectFilter.sql}
+        GROUP BY p.id, p.code, p.name, p.status, p.priority, p.progress, p.color, p.budget, p.start_date, p.end_date, u.name
+        ORDER BY task_count DESC, p.name ASC`,
+      projectFilter.params
+    ),
+    query(
+      `SELECT t.status, COUNT(*) AS count
+         FROM tasks t
+        WHERE ${taskFilter.sql}
+        GROUP BY t.status`,
+      taskFilter.params
+    ),
+  ]);
+
+  const pStats = projectRow[0] || {};
+  const tStats = taskRow[0] || {};
+  const fin = financialRow[0] || {};
+
+  const totalBudget = Number(fin.total_budget || 0);
+  const totalEstimatedCost = Number(fin.total_estimated_cost || 0);
+  const totalDirectExpenses = Number(fin.total_direct_expenses || 0);
+  const totalTaskActualCost = Number(fin.total_task_actual_cost || 0);
+  const totalActualCost = totalTaskActualCost + totalDirectExpenses;
+  const remainingBudget = totalBudget > 0 ? Math.max(0, totalBudget - totalActualCost) : 0;
+  const budgetUtilizationRate = totalBudget > 0 ? Math.round((totalActualCost / totalBudget) * 1000) / 10 : 0;
+
+  // If a single project is selected, load its full EVM curve
+  let evmData = null;
+  if (projectId) {
+    try {
+      evmData = await computeProjectEvmData(Number(projectId), { from, to });
+    } catch {
+      evmData = null;
+    }
+  } else if (projectRows.length > 0) {
+    // Or load EVM for the most active project as executive sample
+    try {
+      evmData = await computeProjectEvmData(Number(projectRows[0].id), { from, to });
+    } catch {
+      evmData = null;
+    }
+  }
+
+  const selectedProject = projectId ? projectRows.find((p) => Number(p.id) === Number(projectId)) || null : null;
+
+  const payload = {
+    generatedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+    generatedBy: {
+      id: req.user.id,
+      name: req.user.name,
+      role: req.user.role,
+      email: req.user.email,
+    },
+    scope: {
+      isSingleProject: Boolean(projectId),
+      project: selectedProject,
+      from: from || null,
+      to: to || null,
+    },
+    kpi: {
+      totalProjects: Number(pStats.total || 0),
+      activeProjects: Number(pStats.active || 0),
+      completedProjects: Number(pStats.completed || 0),
+      planningProjects: Number(pStats.planning || 0),
+      onHoldProjects: Number(pStats.on_hold || 0),
+      avgProgress: pStats.avg_progress === null ? 0 : Math.round(Number(pStats.avg_progress) * 10) / 10,
+      totalTasks: Number(tStats.total || 0),
+      doneTasks: Number(tStats.done || 0),
+      openTasks: Number(tStats.open_tasks || 0),
+      overdueTasks: Number(tStats.overdue || 0),
+      completionRate: percentage(Number(tStats.done || 0), Number(tStats.total || 0)),
+      onTimeCompletionRate: percentage(Number(tStats.on_time || 0), Number(tStats.completed || 0)),
+      avgTaskDuration: tStats.avg_duration === null ? 0 : Math.round(Number(tStats.avg_duration) * 10) / 10,
+    },
+    financials: {
+      totalBudget,
+      totalEstimatedCost,
+      totalActualCost,
+      remainingBudget,
+      budgetUtilizationRate,
+      pendingExpensesAmount: Number(fin.total_pending_expenses || 0),
+      pendingExpensesCount: Number(fin.pending_expense_count || 0),
+    },
+    evm: evmData,
+    milestones: milestoneRows.map((m) => ({
+      id: m.id,
+      projectId: m.project_id,
+      projectCode: m.project_code,
+      projectName: m.project_name,
+      name: m.name,
+      description: m.description,
+      dueDate: m.due_date ? dayjs(m.due_date).format('YYYY-MM-DD') : null,
+      status: m.status,
+      progress: Number(m.progress || 0),
+    })),
+    overdueTasks: overdueRows.map((t) => ({
+      id: t.id,
+      title: t.title,
+      priority: t.priority,
+      status: t.status,
+      dueDate: t.due_date ? dayjs(t.due_date).format('YYYY-MM-DD') : null,
+      daysOverdue: Math.max(0, Number(t.days_overdue || 0)),
+      progress: Number(t.progress || 0),
+      estimatedCost: Number(t.estimated_cost || 0),
+      actualCost: Number(t.actual_cost || 0),
+      projectId: t.project_id,
+      projectCode: t.project_code,
+      projectName: t.project_name,
+      assigneeName: t.assignee_name,
+      assigneeAvatar: t.assignee_avatar,
+    })),
+    projectBreakdown: projectRows.map((p) => {
+      const pBudget = Number(p.budget || 0);
+      const pActual = Number(p.actual_cost || 0);
+      const pEstCost = Number(p.total_estimated_cost || 0);
+      const taskCount = Number(p.task_count || 0);
+      const completedCount = Number(p.completed_count || 0);
+      const bacVal = pEstCost > 0 ? pEstCost : pBudget;
+      const progressVal = Number(p.progress || 0);
+      const evVal = Math.round(bacVal * (progressVal / 100));
+      const cpiVal = pActual > 0 ? Math.round((evVal / pActual) * 100) / 100 : (evVal > 0 ? 1 : null);
+
+      return {
+        id: p.id,
+        code: p.code,
+        name: p.name,
+        status: p.status,
+        statusLabel: PROJECT_STATUS[p.status]?.label || p.status,
+        priority: p.priority,
+        progress: progressVal,
+        color: p.color,
+        budget: pBudget,
+        estimatedCost: pEstCost,
+        actualCost: pActual,
+        taskCount,
+        completedCount,
+        completionRate: percentage(completedCount, taskCount),
+        startDate: p.start_date ? dayjs(p.start_date).format('YYYY-MM-DD') : null,
+        endDate: p.end_date ? dayjs(p.end_date).format('YYYY-MM-DD') : null,
+        managerName: p.manager_name,
+        cpi: cpiVal,
+      };
+    }),
+  };
+
+  return sendSuccess(res, payload, 'Berhasil memuat laporan eksekutif');
+});
+
 module.exports = {
   getOverview,
   getStatusDistribution,
   getProductivity,
   getBurndown,
+  getEvm,
+  getExecutiveReport,
   getCompletionTrend,
   exportReport,
 };

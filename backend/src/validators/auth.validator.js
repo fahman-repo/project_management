@@ -71,6 +71,11 @@ const createUserSchema = z.object({
   phone: optionalString(30),
   job_title: optionalString(120),
   bio: optionalString(2000),
+  weekly_capacity_hours: z.coerce
+    .number()
+    .min(1, 'Kapasitas minimal 1 jam per minggu')
+    .max(168, 'Kapasitas maksimal 168 jam per minggu')
+    .optional(),
 });
 
 /** PATCH /users/:id */
@@ -82,6 +87,11 @@ const updateUserSchema = z.object({
   phone: optionalString(30),
   job_title: optionalString(120),
   bio: optionalString(2000),
+  weekly_capacity_hours: z.coerce
+    .number()
+    .min(1, 'Kapasitas minimal 1 jam per minggu')
+    .max(168, 'Kapasitas maksimal 168 jam per minggu')
+    .optional(),
   is_active: z.boolean().optional(),
 });
 

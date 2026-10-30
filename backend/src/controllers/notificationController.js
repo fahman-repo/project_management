@@ -6,6 +6,7 @@ const ApiError = require('../utils/ApiError');
 const { getPagination } = require('../utils/pagination');
 const { execute, query } = require('../config/database');
 const notificationService = require('../services/notificationService');
+const reminderService = require('../services/reminderService');
 
 /**
  * GET /api/v1/notifications
@@ -84,10 +85,20 @@ const deleteReadNotifications = asyncHandler(async (req, res) => {
   );
 });
 
+/**
+ * POST /api/v1/notifications/run-reminders
+ * Admin / Manager trigger for deadline reminders
+ */
+const triggerReminders = asyncHandler(async (req, res) => {
+  const result = await reminderService.runDueReminders();
+  return sendSuccess(res, result, 'Pengecekan pengingat tenggat berhasil dijalankan');
+});
+
 module.exports = {
   listNotifications,
   markAsRead,
   markAllAsRead,
   deleteNotification,
   deleteReadNotifications,
+  triggerReminders,
 };

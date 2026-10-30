@@ -34,6 +34,13 @@ const booleanFlag = z.preprocess(
   z.boolean().optional()
 );
 
+/** GET /reports/overview */
+const overviewQuery = z.object({
+  from: optionalDateString,
+  to: optionalDateString,
+  project_id: optionalId,
+});
+
 /** GET /reports/status-distribution */
 const statusDistributionQuery = z.object({
   project_id: optionalId,
@@ -49,6 +56,21 @@ const productivityQuery = z.object({
 /** GET /reports/burndown */
 const burndownQuery = z.object({
   project_id: requiredId,
+  from: optionalDateString,
+  to: optionalDateString,
+});
+
+/** GET /reports/evm */
+const evmQuery = z.object({
+  project_id: requiredId,
+  from: optionalDateString,
+  to: optionalDateString,
+  interval: z.enum(['daily', 'weekly']).optional().default('daily'),
+});
+
+/** GET /reports/executive */
+const executiveReportQuery = z.object({
+  project_id: optionalId,
   from: optionalDateString,
   to: optionalDateString,
 });
@@ -94,9 +116,12 @@ module.exports = {
   requiredId,
   optionalText,
   booleanFlag,
+  overviewQuery,
   statusDistributionQuery,
   productivityQuery,
   burndownQuery,
+  evmQuery,
+  executiveReportQuery,
   completionTrendQuery,
   exportQuery,
   calendarEventsQuery,

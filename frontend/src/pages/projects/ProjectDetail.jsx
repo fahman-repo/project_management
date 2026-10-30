@@ -25,11 +25,15 @@ import {
   Users,
   Sliders,
   Bookmark,
+  ShieldAlert,
+  FileText,
 } from 'lucide-react';
 import { ProjectStatusModal } from '../../components/shared/ProjectStatusModal';
 import { SaveAsTemplateModal } from '../../components/shared/SaveAsTemplateModal';
 import { GanttChartView } from '../../components/shared/GanttChartView';
 import { ProjectBudgetTab } from '../../components/shared/ProjectBudgetTab';
+import { ProjectRiskTab } from '../../components/shared/ProjectRiskTab';
+import { ProjectDocumentTab } from '../../components/shared/ProjectDocumentTab';
 import { TaskDetailDrawer } from '../../components/shared/TaskDetailDrawer';
 import { milestoneApi } from '../../api';
 import { taskApi } from '../../api/task.api';
@@ -364,8 +368,10 @@ export default function ProjectDetail() {
   const recentActivity = overview?.recent_activity ?? [];
 
   const isOwner = Boolean(project && Number(project.manager_id) === Number(user?.id));
+  const memberRecord = members.find((m) => Number(m.user_id || m.id) === Number(user?.id));
+  const isProjectManagerOrOwner = Boolean(memberRecord && ['owner', 'manager'].includes(memberRecord.role));
   const canManage =
-    user?.role === 'admin' || user?.role === 'manager' || isOwner;
+    user?.role === 'admin' || user?.role === 'manager' || isOwner || isProjectManagerOrOwner;
 
   const deleteMutation = useMutation({
     mutationFn: () => projectApi.remove(id),
@@ -572,6 +578,8 @@ export default function ProjectDetail() {
             { key: 'tasks', label: 'Task', count: stats.task_count },
             { key: 'gantt', label: 'Timeline / Gantt' },
             { key: 'budget', label: 'Anggaran & Biaya' },
+            { key: 'risks', label: 'Risiko & Masalah', count: stats.open_risk_count ?? stats.risk_count },
+            { key: 'documents', label: 'Dokumen & Wiki', count: stats.document_count },
             { key: 'members', label: 'Anggota', count: stats.member_count },
             { key: 'milestones', label: 'Milestone', count: stats.milestone_count },
             { key: 'activity', label: 'Aktivitas' },
@@ -582,7 +590,7 @@ export default function ProjectDetail() {
       {/* ---------------- Ringkasan ---------------- */}
       {tab === 'overview' && (
         <div className="space-y-5">
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4 xl:grid-cols-8">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-10">
             <StatTile label="Total Task" value={stats.task_count ?? 0} color="#4f46e5" icon={Flag} />
             <StatTile
               label="Selesai"
@@ -610,6 +618,12 @@ export default function ProjectDetail() {
               icon={Flag}
             />
             <StatTile
+              label="Dokumen & Wiki"
+              value={stats.document_count ?? 0}
+              color="#6366f1"
+              icon={FileText}
+            />
+            <StatTile
               label="Anggaran"
               value={formatCurrency(stats.budget ?? 0)}
               color="#0ea5e9"
@@ -618,6 +632,12 @@ export default function ProjectDetail() {
               label="Realisasi Biaya"
               value={formatCurrency(stats.actual_cost ?? 0)}
               color={stats.budget > 0 && stats.actual_cost > stats.budget ? '#e11d48' : '#10b981'}
+            />
+            <StatTile
+              label="Risiko Terbuka"
+              value={stats.open_risk_count ?? 0}
+              color={stats.critical_risk_count > 0 ? '#ef4444' : '#f59e0b'}
+              icon={ShieldAlert}
             />
           </div>
 
@@ -858,7 +878,27 @@ export default function ProjectDetail() {
 
       {/* ---------------- Anggaran & Biaya ---------------- */}
       {tab === 'budget' && (
-        <ProjectBudgetTab projectId={id} canManage={canManage} />
+        <ProjectBudgetTab projectId={id} canManage={canManage} currentUserId={user?.id} />
+      )}
+
+      {/* ---------------- Risiko & Masalah ---------------- */}
+      {tab === 'risks' && (
+        <ProjectRiskTab
+          projectId={id}
+          members={members}
+          canManage={canManage}
+          currentUserId={user?.id}
+        />
+      )}
+
+      {/* ---------------- Dokumen & Wiki ---------------- */}
+      {tab === 'documents' && (
+        <ProjectDocumentTab
+          projectId={id}
+          members={members}
+          canManage={canManage}
+          currentUserId={user?.id}
+        />
       )}
 
       {/* ---------------- Anggota ---------------- */}

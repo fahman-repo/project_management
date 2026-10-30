@@ -35,7 +35,7 @@ async function requireAuth(req, res, next) {
     }
 
     const user = await queryOne(
-      `SELECT id, name, email, role, phone, avatar, job_title, bio, is_active, last_login_at, created_at, updated_at
+      `SELECT id, name, email, role, phone, avatar, job_title, bio, weekly_capacity_hours, is_active, last_login_at, created_at, updated_at
          FROM users WHERE id = ? LIMIT 1`,
       [payload.id]
     );
@@ -43,7 +43,13 @@ async function requireAuth(req, res, next) {
     if (!user) throw ApiError.unauthorized('Pengguna tidak ditemukan');
     if (!user.is_active) throw ApiError.forbidden('Akun Anda dinonaktifkan');
 
-    req.user = user;
+    req.user = {
+      ...user,
+      weekly_capacity_hours:
+        user.weekly_capacity_hours !== null && user.weekly_capacity_hours !== undefined
+          ? Number(user.weekly_capacity_hours)
+          : 40,
+    };
     req.token = token;
     return next();
   } catch (error) {
@@ -60,11 +66,19 @@ async function optionalAuth(req, res, next) {
   try {
     const payload = verifyToken(token);
     const user = await queryOne(
-      `SELECT id, name, email, role, phone, avatar, job_title, bio, is_active, last_login_at, created_at, updated_at
+      `SELECT id, name, email, role, phone, avatar, job_title, bio, weekly_capacity_hours, is_active, last_login_at, created_at, updated_at
          FROM users WHERE id = ? LIMIT 1`,
       [payload.id]
     );
-    if (user && user.is_active) req.user = user;
+    if (user && user.is_active) {
+      req.user = {
+        ...user,
+        weekly_capacity_hours:
+          user.weekly_capacity_hours !== null && user.weekly_capacity_hours !== undefined
+            ? Number(user.weekly_capacity_hours)
+            : 40,
+      };
+    }
   } catch (error) {
     // ignore - request proceeds anonymously
   }

@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
+  AlertTriangle,
   BadgeCheck,
   Briefcase,
   CalendarClock,
+  Clock,
+  Flame,
   Grid3x3,
   List,
   Mail,
@@ -37,8 +41,10 @@ import { Table, TBody, TD, TH, THead, TR } from '../components/ui/Table';
 import { RoleBadge } from '../components/shared/Badges';
 import { PageHeader } from '../components/shared/StatCard';
 import { UserFormModal } from '../components/shared/UserFormModal';
+import { WorkloadHeatmapView } from '../components/shared/WorkloadHeatmapView';
 import { useAuthStore } from '../store/authStore';
 import { formatDate, formatRelative } from '../utils/formatters';
+import { cn } from '../utils/cn';
 
 const PER_PAGE = 12;
 
@@ -56,6 +62,7 @@ const STATUS_OPTIONS = [
 const VIEW_OPTIONS = [
   { value: 'grid', label: 'Grid', icon: <Grid3x3 className="h-3.5 w-3.5" /> },
   { value: 'table', label: 'Table', icon: <List className="h-3.5 w-3.5" /> },
+  { value: 'heatmap', label: 'Heatmap Kapasitas', icon: <Flame className="h-3.5 w-3.5" /> },
 ];
 
 const WORKLOAD_ROWS = [
@@ -100,13 +107,15 @@ function ActiveBadge({ isActive }) {
  * Team directory - browse members in a grid or table and inspect their workload.
  */
 export default function Team() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const currentUser = useAuthStore((state) => state.user);
   const isAdmin = currentUser?.role === 'admin';
 
+  const initialSearch = searchParams.get('search') || '';
   const [page, setPage] = useState(1);
-  const [searchInput, setSearchInput] = useState('');
-  const [search, setSearch] = useState('');
+  const [searchInput, setSearchInput] = useState(initialSearch);
+  const [search, setSearch] = useState(initialSearch);
   const [role, setRole] = useState('');
   const [status, setStatus] = useState('');
   const [view, setView] = useState('grid');
@@ -114,6 +123,16 @@ export default function Team() {
   const [detailUser, setDetailUser] = useState(null);
   const [formState, setFormState] = useState({ open: false, user: null });
   const [confirmState, setConfirmState] = useState(null);
+
+  // Sync search input if URL search parameter changes
+  useEffect(() => {
+    const val = searchParams.get('search');
+    if (val !== null && val !== searchInput) {
+      setSearchInput(val);
+      setSearch(val.trim());
+      setPage(1);
+    }
+  }, [searchParams]);
 
   // Debounce the search term so typing does not spam the API.
   useEffect(() => {
@@ -241,35 +260,44 @@ export default function Team() {
   const filters = (
     <Card className="mb-5">
       <CardBody className="flex flex-col gap-3 lg:flex-row lg:items-center">
-        <div className="lg:w-72">
-          <Input
-            type="search"
-            placeholder="Cari nama atau email..."
-            icon={<Search className="h-4 w-4" />}
-            value={searchInput}
-            onChange={(event) => setSearchInput(event.target.value)}
-            aria-label="Cari anggota tim"
-          />
-        </div>
+        {view !== 'heatmap' ? (
+          <>
+            <div className="lg:w-72">
+              <Input
+                type="search"
+                placeholder="Cari nama atau email..."
+                icon={<Search className="h-4 w-4" />}
+                value={searchInput}
+                onChange={(event) => setSearchInput(event.target.value)}
+                aria-label="Cari anggota tim"
+              />
+            </div>
 
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:flex lg:items-center">
-          <Select
-            options={ROLE_OPTIONS}
-            placeholder="Semua Peran"
-            value={role}
-            onChange={(event) => setRole(event.target.value)}
-            containerClassName="lg:w-44"
-            aria-label="Filter peran"
-          />
-          <Select
-            options={STATUS_OPTIONS}
-            placeholder="Semua Status"
-            value={status}
-            onChange={(event) => setStatus(event.target.value)}
-            containerClassName="lg:w-40"
-            aria-label="Filter status"
-          />
-        </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:flex lg:items-center">
+              <Select
+                options={ROLE_OPTIONS}
+                placeholder="Semua Peran"
+                value={role}
+                onChange={(event) => setRole(event.target.value)}
+                containerClassName="lg:w-44"
+                aria-label="Filter peran"
+              />
+              <Select
+                options={STATUS_OPTIONS}
+                placeholder="Semua Status"
+                value={status}
+                onChange={(event) => setStatus(event.target.value)}
+                containerClassName="lg:w-40"
+                aria-label="Filter status"
+              />
+            </div>
+          </>
+        ) : (
+          <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+            <Flame className="h-4 w-4 text-brand-600 dark:text-brand-400" />
+            <span>Matriks Resource Capacity & Workload Heatmap memetakan alokasi jam kerja mingguan per anggota tim.</span>
+          </div>
+        )}
 
         <div className="lg:ml-auto">
           <SegmentedControl options={VIEW_OPTIONS} value={view} onChange={setView} />
@@ -282,6 +310,10 @@ export default function Team() {
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
       {users.map((member) => {
         const workload = workloadMap.get(member.id);
+        const capHours = Number(member.weekly_capacity_hours || workload?.weeklyCapacityHours) || 40;
+        const currHours = Number(workload?.currentWeekHours) || 0;
+        const utilPercent = capHours > 0 ? Math.round((currHours / capHours) * 100) : 0;
+        const isOver = currHours > capHours;
 
         return (
           <Card
@@ -349,19 +381,50 @@ export default function Team() {
                 </p>
               </div>
 
-              <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-                <div className="flex items-center gap-2">
-                  <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand-50 text-brand-600 dark:bg-brand-500/10 dark:text-brand-300">
-                    <BadgeCheck className="h-4 w-4" />
-                  </span>
-                  <div>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Tugas Aktif</p>
-                    <p className="text-sm font-semibold tabular-nums text-slate-900 dark:text-white">
-                      {activeTaskCount(workload)}
-                    </p>
+              <div className="space-y-2 border-t border-slate-100 pt-3 dark:border-slate-800">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand-50 text-brand-600 dark:bg-brand-500/10 dark:text-brand-300">
+                      <BadgeCheck className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">Tugas Aktif</p>
+                      <p className="text-sm font-semibold tabular-nums text-slate-900 dark:text-white">
+                        {activeTaskCount(workload)}
+                      </p>
+                    </div>
                   </div>
+                  <ActiveBadge isActive={member.is_active} />
                 </div>
-                <ActiveBadge isActive={member.is_active} />
+
+                {/* Capacity & Workload meter this week */}
+                <div className="rounded-lg border border-slate-100 bg-slate-50/70 p-2 dark:border-slate-800/80 dark:bg-slate-900/40">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
+                      <Clock className="h-3 w-3" />
+                      <span>Minggu ini:</span>
+                    </span>
+                    <div className="flex items-center gap-1">
+                      {isOver && <AlertTriangle className="h-3 w-3 text-rose-500" />}
+                      <span
+                        className={cn(
+                          'font-semibold tabular-nums',
+                          isOver
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : 'text-slate-700 dark:text-slate-300'
+                        )}
+                      >
+                        {currHours}j / {capHours}j ({utilPercent}%)
+                      </span>
+                    </div>
+                  </div>
+                  <ProgressBar
+                    value={Math.min(100, utilPercent)}
+                    color={isOver ? '#ef4444' : utilPercent > 85 ? '#f59e0b' : '#10b981'}
+                    size="xs"
+                    className="mt-1.5"
+                  />
+                </div>
               </div>
             </CardBody>
           </Card>
@@ -382,12 +445,17 @@ export default function Team() {
             <TH>Status</TH>
             <TH>Login Terakhir</TH>
             <TH align="right">Tugas Aktif</TH>
+            <TH align="right">Beban Minggu Ini</TH>
             {isAdmin && <TH align="right">Aksi</TH>}
           </TR>
         </THead>
         <TBody>
           {users.map((member) => {
             const workload = workloadMap.get(member.id);
+            const capHours = Number(member.weekly_capacity_hours || workload?.weeklyCapacityHours) || 40;
+            const currHours = Number(workload?.currentWeekHours) || 0;
+            const utilPercent = capHours > 0 ? Math.round((currHours / capHours) * 100) : 0;
+            const isOver = currHours > capHours;
 
             return (
               <TR key={member.id} onClick={() => setDetailUser(member)}>
@@ -427,6 +495,30 @@ export default function Team() {
                     {activeTaskCount(workload)}
                   </span>
                 </TD>
+                <TD align="right">
+                  <div className="inline-flex flex-col items-end">
+                    <span
+                      className={cn(
+                        'text-xs font-semibold tabular-nums',
+                        isOver
+                          ? 'text-rose-600 dark:text-rose-400'
+                          : 'text-slate-900 dark:text-white'
+                      )}
+                    >
+                      {currHours}j / {capHours}j
+                    </span>
+                    <span
+                      className={cn(
+                        'text-[10px] tabular-nums',
+                        isOver
+                          ? 'font-bold text-rose-600 dark:text-rose-400'
+                          : 'text-slate-500 dark:text-slate-400'
+                      )}
+                    >
+                      {utilPercent}% {isOver && '• Overload'}
+                    </span>
+                  </div>
+                </TD>
                 {isAdmin && (
                   <TD align="right">
                     <div onClick={(event) => event.stopPropagation()}>
@@ -464,6 +556,10 @@ export default function Team() {
   );
 
   const body = () => {
+    if (view === 'heatmap') {
+      return <WorkloadHeatmapView />;
+    }
+
     if (listQuery.isLoading) return <LoadingState label="Memuat anggota tim..." />;
 
     if (listQuery.isError) {
@@ -540,7 +636,7 @@ export default function Team() {
       {filters}
       {body()}
 
-      {total > 0 && (
+      {view !== 'heatmap' && total > 0 && (
         <Card className="mt-5">
           <CardBody>
             <Pagination
@@ -623,6 +719,26 @@ export default function Team() {
                 </div>
               </div>
               <div className="flex items-start gap-3">
+                <Clock className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
+                <div className="min-w-0 flex-1">
+                  <dt className="text-xs text-slate-500 dark:text-slate-400">Kapasitas Kerja</dt>
+                  <dd className="flex items-center justify-between text-slate-700 dark:text-slate-300">
+                    <span className="font-medium">{detailUser.weekly_capacity_hours || 40} jam / minggu</span>
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-brand-600 hover:text-brand-700 hover:underline dark:text-brand-400"
+                      onClick={() => {
+                        setDetailUser(null);
+                        setView('heatmap');
+                      }}
+                    >
+                      <span>Lihat Heatmap</span>
+                      <Flame className="h-3.5 w-3.5" />
+                    </button>
+                  </dd>
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
                 <CalendarClock className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
                 <div className="min-w-0">
                   <dt className="text-xs text-slate-500 dark:text-slate-400">Bergabung</dt>
@@ -650,6 +766,49 @@ export default function Team() {
                 </p>
               </div>
             )}
+
+            {/* Weekly Capacity Card */}
+            {(() => {
+              const capHours = Number(detailUser.weekly_capacity_hours || detailWorkload?.weeklyCapacityHours) || 40;
+              const currHours = Number(detailWorkload?.currentWeekHours) || 0;
+              const utilPercent = capHours > 0 ? Math.round((currHours / capHours) * 100) : 0;
+              const isOver = currHours > capHours;
+
+              return (
+                <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-900/40">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-semibold text-slate-900 dark:text-white">
+                      Beban Jam Minggu Ini
+                    </p>
+                    {isOver && (
+                      <span className="flex items-center gap-1 text-[11px] font-bold text-rose-600 dark:text-rose-400">
+                        <AlertTriangle className="h-3 w-3" />
+                        Overallocated
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-2 flex items-baseline justify-between text-xs">
+                    <span className="text-slate-500 dark:text-slate-400">
+                      Teralokasi: <strong className="text-slate-800 dark:text-slate-200">{currHours} jam</strong>
+                    </span>
+                    <span className="font-semibold text-slate-700 dark:text-slate-300">
+                      Kapasitas: {capHours} jam ({utilPercent}%)
+                    </span>
+                  </div>
+                  <ProgressBar
+                    value={Math.min(100, utilPercent)}
+                    color={isOver ? '#ef4444' : utilPercent > 85 ? '#f59e0b' : '#10b981'}
+                    size="sm"
+                    className="mt-2"
+                  />
+                  {Number(detailWorkload?.activeEstimatedHours) > 0 && (
+                    <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      Total estimasi task aktif: <strong>{detailWorkload.activeEstimatedHours} jam</strong>
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
 
             <div>
               <p className="mb-3 text-xs font-medium text-slate-700 dark:text-slate-300">

@@ -136,6 +136,33 @@ export const taskApi = {
    */
   removeDependency: (id, dependencyId) =>
     api.delete(`/tasks/${id}/dependencies/${dependencyId}`).then((res) => res.data.data),
+
+  /**
+   * @param {number} id
+   */
+  checklists: (id) => api.get(`/tasks/${id}/checklists`).then((res) => res.data.data),
+
+  /**
+   * @param {number} id
+   * @param {{title:string}} payload
+   */
+  addChecklist: (id, payload) =>
+    api.post(`/tasks/${id}/checklists`, payload).then((res) => res.data.data),
+
+  /**
+   * @param {number} id
+   * @param {number} checklistId
+   * @param {{title?:string, is_checked?:boolean, position?:number}} payload
+   */
+  updateChecklist: (id, checklistId, payload) =>
+    api.patch(`/tasks/${id}/checklists/${checklistId}`, payload).then((res) => res.data.data),
+
+  /**
+   * @param {number} id
+   * @param {number} checklistId
+   */
+  removeChecklist: (id, checklistId) =>
+    api.delete(`/tasks/${id}/checklists/${checklistId}`).then((res) => res.data.data),
 };
 
 export default taskApi;

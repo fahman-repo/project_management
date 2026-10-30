@@ -3,6 +3,7 @@
 const express = require('express');
 const { validate } = require('../middleware/validate');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { uploadSingle } = require('../middleware/upload');
 const controller = require('../controllers/projectController');
 const {
   projectIdParams,
@@ -21,7 +22,18 @@ const {
   listExpensesQuery,
   createExpenseSchema,
   updateExpenseSchema,
+  expenseStatusSchema,
   expenseParams,
+  listRisksQuery,
+  createRiskSchema,
+  updateRiskSchema,
+  riskParams,
+  documentParams,
+  documentVersionParams,
+  listDocumentsQuery,
+  createDocumentSchema,
+  updateDocumentSchema,
+  restoreDocumentVersionSchema,
 } = require('../validators/project.validator');
 
 const router = express.Router();
@@ -95,21 +107,85 @@ router.get(
 );
 router.post(
   '/:id/expenses',
-  requireRole('admin', 'manager'),
-  validate({ params: projectIdParams, body: createExpenseSchema }),
+  validate({ params: projectIdParams }),
+  uploadSingle('receipt'),
+  validate({ body: createExpenseSchema }),
   controller.createExpense
 );
 router.patch(
   '/:id/expenses/:expenseId',
-  requireRole('admin', 'manager'),
-  validate({ params: expenseParams, body: updateExpenseSchema }),
+  validate({ params: expenseParams }),
+  uploadSingle('receipt'),
+  validate({ body: updateExpenseSchema }),
   controller.updateExpense
+);
+router.patch(
+  '/:id/expenses/:expenseId/status',
+  validate({ params: expenseParams, body: expenseStatusSchema }),
+  controller.updateExpenseStatus
 );
 router.delete(
   '/:id/expenses/:expenseId',
-  requireRole('admin', 'manager'),
   validate({ params: expenseParams }),
   controller.deleteExpense
+);
+
+// Risks & Issues Register
+router.get(
+  '/:id/risks',
+  validate({ params: projectIdParams, query: listRisksQuery }),
+  controller.listRisks
+);
+router.post(
+  '/:id/risks',
+  validate({ params: projectIdParams, body: createRiskSchema }),
+  controller.createRisk
+);
+router.patch(
+  '/:id/risks/:riskId',
+  validate({ params: riskParams, body: updateRiskSchema }),
+  controller.updateRisk
+);
+router.delete(
+  '/:id/risks/:riskId',
+  validate({ params: riskParams }),
+  controller.deleteRisk
+);
+
+// Documents, Wiki & Versioning
+router.get(
+  '/:id/documents',
+  validate({ params: projectIdParams, query: listDocumentsQuery }),
+  controller.listDocuments
+);
+router.get(
+  '/:id/documents/:docId',
+  validate({ params: documentParams }),
+  controller.getDocument
+);
+router.post(
+  '/:id/documents',
+  validate({ params: projectIdParams }),
+  uploadSingle('file'),
+  validate({ body: createDocumentSchema }),
+  controller.createDocument
+);
+router.patch(
+  '/:id/documents/:docId',
+  validate({ params: documentParams }),
+  uploadSingle('file'),
+  validate({ body: updateDocumentSchema }),
+  controller.updateDocument
+);
+router.post(
+  '/:id/documents/:docId/versions/:versionId/restore',
+  validate({ params: documentVersionParams, body: restoreDocumentVersionSchema }),
+  controller.restoreDocumentVersion
+);
+router.delete(
+  '/:id/documents/:docId',
+  validate({ params: documentParams }),
+  controller.deleteDocument
 );
 
 // Save project as template

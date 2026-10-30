@@ -11,7 +11,8 @@
     "seed": "node src/database/seed.js",
     "db:reset": "node src/database/migrate.js --fresh && node src/database/seed.js",
     "verify:realtime": "node scripts/verify-realtime.js",
-    "verify:api": "node scripts/verify-api.js"
+    "verify:api": "node scripts/verify-api.js",
+    "verify:collab": "node scripts/verify-collab-search-reminder.js"
   },
   "keywords": [
     "project-management",
@@ -32,6 +33,7 @@
     "morgan": "^1.10.0",
     "multer": "^2.0.2",
     "mysql2": "^3.12.0",
+    "nodemailer": "^10.3.0",
     "socket.io": "^4.8.1",
     "zod": "^3.24.1"
   },

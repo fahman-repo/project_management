@@ -11,7 +11,18 @@ const SORTABLE = {
 };
 
 const SELECT_FIELDS = `u.id, u.name, u.email, u.role, u.phone, u.avatar, u.job_title,
-       u.bio, u.is_active, u.last_login_at, u.created_at, u.updated_at`;
+       u.bio, u.weekly_capacity_hours, u.is_active, u.last_login_at, u.created_at, u.updated_at`;
+
+function normalizeUser(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    weekly_capacity_hours:
+      row.weekly_capacity_hours !== null && row.weekly_capacity_hours !== undefined
+        ? Number(row.weekly_capacity_hours)
+        : 40,
+  };
+}
 
 /**
  * @param {object} options
@@ -32,19 +43,22 @@ async function listUsers(options = {}) {
 
   const { whereSql, params } = buildWhere(conditions);
 
-  return paginatedQuery(
+  const { rows, total } = await paginatedQuery(
     `SELECT ${SELECT_FIELDS} FROM users u ${whereSql}`,
     `SELECT COUNT(*) AS total FROM users u ${whereSql}`,
     params,
     { limit, offset }
   );
+
+  return { rows: rows.map(normalizeUser), total };
 }
 
 /**
  * @param {number} id
  */
 async function findById(id) {
-  return queryOne(`SELECT ${SELECT_FIELDS} FROM users u WHERE u.id = ? LIMIT 1`, [id]);
+  const row = await queryOne(`SELECT ${SELECT_FIELDS} FROM users u WHERE u.id = ? LIMIT 1`, [id]);
+  return normalizeUser(row);
 }
 
 /**
@@ -74,12 +88,13 @@ async function createUser(data) {
     job_title = null,
     bio = null,
     avatar = null,
+    weekly_capacity_hours = 40,
   } = data;
 
   const result = await execute(
-    `INSERT INTO users (name, email, password, role, phone, job_title, bio, avatar)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [name, email, password, role, phone, job_title, bio, avatar]
+    `INSERT INTO users (name, email, password, role, phone, job_title, bio, avatar, weekly_capacity_hours)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [name, email, password, role, phone, job_title, bio, avatar, weekly_capacity_hours]
   );
 
   return result.insertId;
@@ -93,7 +108,18 @@ async function updateUser(id, data) {
   const fields = [];
   const params = [];
 
-  const allowed = ['name', 'email', 'role', 'phone', 'job_title', 'bio', 'avatar', 'is_active', 'password'];
+  const allowed = [
+    'name',
+    'email',
+    'role',
+    'phone',
+    'job_title',
+    'bio',
+    'avatar',
+    'weekly_capacity_hours',
+    'is_active',
+    'password',
+  ];
 
   for (const key of allowed) {
     if (data[key] !== undefined) {
@@ -136,12 +162,13 @@ async function listActive(options = {}) {
     { sql: '(u.name LIKE ? OR u.email LIKE ?)', value: search ? `%${search}%` : undefined },
   ]);
 
-  return query(
-    `SELECT u.id, u.name, u.email, u.role, u.avatar, u.job_title
+  const rows = await query(
+    `SELECT u.id, u.name, u.email, u.role, u.avatar, u.job_title, u.weekly_capacity_hours
        FROM users u ${whereSql}
        ORDER BY u.name ASC`,
     params
   );
+  return rows.map(normalizeUser);
 }
 
 /**

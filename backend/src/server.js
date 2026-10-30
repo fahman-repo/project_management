@@ -5,6 +5,7 @@ const app = require('./app');
 const env = require('./config/env');
 const { pool, testConnection } = require('./config/database');
 const { initSocket } = require('./sockets');
+const reminderService = require('./services/reminderService');
 
 const server = http.createServer(app);
 const io = initSocket(server);
@@ -30,6 +31,8 @@ async function start() {
     console.log(`[server] Socket.IO ready on port ${env.PORT}`);
     // eslint-disable-next-line no-console
     console.log(`[server] Env      -> ${env.NODE_ENV}`);
+
+    reminderService.startReminderScheduler();
   });
 }
 
@@ -37,6 +40,8 @@ async function start() {
 function shutdown(signal) {
   // eslint-disable-next-line no-console
   console.log(`[server] ${signal} received, shutting down...`);
+
+  reminderService.stopReminderScheduler();
 
   io.close(() => {
     pool.end(() => {

@@ -23,6 +23,14 @@ const env = {
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '7d',
   UPLOAD_DIR: process.env.UPLOAD_DIR || 'uploads',
   MAX_UPLOAD_SIZE: Number(process.env.MAX_UPLOAD_SIZE) || 10 * 1024 * 1024,
+  SMTP_HOST: process.env.SMTP_HOST || '',
+  SMTP_PORT: Number(process.env.SMTP_PORT) || 587,
+  SMTP_SECURE: process.env.SMTP_SECURE === 'true' || process.env.SMTP_PORT === '465',
+  SMTP_USER: process.env.SMTP_USER || '',
+  SMTP_PASS: process.env.SMTP_PASS || '',
+  SMTP_FROM: process.env.SMTP_FROM || 'ProjectFlow <no-reply@projectflow.local>',
+  REMINDER_ENABLED: process.env.REMINDER_ENABLED !== 'false',
+  REMINDER_INTERVAL_MINUTES: Number(process.env.REMINDER_INTERVAL_MINUTES) || 60,
   ROOT_DIR: ROOT,
 };
 

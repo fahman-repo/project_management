@@ -25,6 +25,10 @@ const BASE_FIELDS = {
   job_title: z.string().trim().max(120, 'Jabatan maksimal 120 karakter').optional(),
   phone: z.string().trim().max(30, 'Telepon maksimal 30 karakter').optional(),
   bio: z.string().trim().max(2000, 'Bio maksimal 2000 karakter').optional(),
+  weekly_capacity_hours: z.coerce
+    .number()
+    .min(1, 'Kapasitas minimal 1 jam/minggu')
+    .max(168, 'Kapasitas maksimal 168 jam/minggu'),
 };
 
 const createSchema = z.object({
@@ -63,6 +67,7 @@ function buildDefaults(user) {
       job_title: '',
       phone: '',
       bio: '',
+      weekly_capacity_hours: 40,
       is_active: true,
     };
   }
@@ -75,6 +80,7 @@ function buildDefaults(user) {
     job_title: user.job_title || '',
     phone: user.phone || '',
     bio: user.bio || '',
+    weekly_capacity_hours: Number(user.weekly_capacity_hours) || 40,
     is_active: Boolean(user.is_active),
   };
 }
@@ -128,6 +134,7 @@ export function UserFormModal({ open, onClose, user = null, onSaved }) {
         job_title: values.job_title?.trim() || undefined,
         phone: values.phone?.trim() || undefined,
         bio: values.bio?.trim() || undefined,
+        weekly_capacity_hours: Number(values.weekly_capacity_hours) || 40,
       };
 
       if (values.password) payload.password = values.password;
@@ -144,6 +151,8 @@ export function UserFormModal({ open, onClose, user = null, onSaved }) {
       toast.success(isEdit ? 'Pengguna berhasil diperbarui' : 'Pengguna berhasil dibuat');
       queryClient.invalidateQueries({ queryKey: ['users'] });
       queryClient.invalidateQueries({ queryKey: ['user', user?.id] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard', 'workload'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard', 'capacity-heatmap'] });
       onSaved?.(saved);
       onClose?.();
     },
@@ -234,7 +243,7 @@ export function UserFormModal({ open, onClose, user = null, onSaved }) {
           />
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-3">
           <Input
             label="Jabatan"
             placeholder="Frontend Engineer"
@@ -246,6 +255,18 @@ export function UserFormModal({ open, onClose, user = null, onSaved }) {
             placeholder="081234567890"
             error={errorFor('phone')}
             {...register('phone')}
+          />
+          <Input
+            label="Kapasitas (Jam/Mgg)"
+            type="number"
+            step="1"
+            min="1"
+            max="168"
+            placeholder="40"
+            required
+            hint="Standar: 40 jam/minggu"
+            error={errorFor('weekly_capacity_hours')}
+            {...register('weekly_capacity_hours')}
           />
         </div>
 

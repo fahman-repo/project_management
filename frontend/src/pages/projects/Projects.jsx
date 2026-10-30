@@ -315,7 +315,11 @@ export default function Projects() {
             </THead>
             <TBody>
               {projects.map((project) => (
-                <TR key={project.id} onClick={() => navigate(`/projects/${project.id}`)}>
+                <TR
+                  key={project.id}
+                  onClick={() => navigate(`/projects/${project.id}`)}
+                  className="cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors"
+                >
                   <TD className="font-mono text-xs text-slate-500 dark:text-slate-400">
                     {project.code}
                   </TD>

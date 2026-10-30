@@ -368,12 +368,13 @@ const getTask = asyncHandler(async (req, res) => {
   await loadViewableTask(req.user, id);
 
   const task = await taskModel.findTaskById(id);
-  const [labels, subtasks, dependencies, comments, attachments] = await Promise.all([
+  const [labels, subtasks, dependencies, comments, attachments, checklists] = await Promise.all([
     taskModel.listTaskLabels(id),
     taskModel.listSubtasks(id),
     taskModel.listDependencies(id),
     taskModel.listComments(id),
     taskModel.listAttachments(id),
+    taskModel.listChecklists(id),
   ]);
 
   const project = await taskModel.findProjectSummary(task.project_id);
@@ -416,6 +417,7 @@ const getTask = asyncHandler(async (req, res) => {
       dependencies: dependencyPayload,
       comments,
       attachments,
+      checklists,
     },
     'Berhasil memuat detail task'
   );
@@ -757,6 +759,56 @@ const listComments = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Extract user IDs mentioned in text matching project candidates.
+ * Supports @[Full Name] and @username / @email_prefix.
+ *
+ * @param {string} text
+ * @param {Array<{id:number, name:string, email?:string}>} candidates
+ * @param {number} currentUserId
+ * @returns {number[]}
+ */
+function extractMentionedUserIds(text, candidates = [], currentUserId = null) {
+  if (!text || !candidates.length) return [];
+  const mentioned = new Set();
+
+  // Pattern 1: @[Full Name]
+  const bracketRegex = /@\[([^\]]+)\]/g;
+  let match;
+  while ((match = bracketRegex.exec(text)) !== null) {
+    const raw = match[1].trim().toLowerCase();
+    const found = candidates.find((c) => c.name.toLowerCase() === raw);
+    if (found && Number(found.id) !== Number(currentUserId)) {
+      mentioned.add(Number(found.id));
+    }
+  }
+
+  // Pattern 2: @token (single word or dotted/underscored/hyphenated identifier)
+  const tokenRegex = /(?:^|\s)@([a-zA-Z0-9._-]+)/g;
+  while ((match = tokenRegex.exec(text)) !== null) {
+    const raw = match[1].trim().toLowerCase();
+    const found = candidates.find((c) => {
+      const name = c.name.toLowerCase();
+      const dotName = name.replace(/\s+/g, '.');
+      const underscoreName = name.replace(/\s+/g, '_');
+      const firstName = name.split(' ')[0];
+      const emailPrefix = c.email ? c.email.split('@')[0].toLowerCase() : '';
+      return (
+        name === raw ||
+        dotName === raw ||
+        underscoreName === raw ||
+        firstName === raw ||
+        emailPrefix === raw
+      );
+    });
+    if (found && Number(found.id) !== Number(currentUserId)) {
+      mentioned.add(Number(found.id));
+    }
+  }
+
+  return [...mentioned];
+}
+
+/**
  * POST /api/v1/tasks/:id/comments
  */
 const createComment = asyncHandler(async (req, res) => {
@@ -781,10 +833,39 @@ const createComment = asyncHandler(async (req, res) => {
     metadata: { comment_id: commentId },
   });
 
-  if (task.assignee_id && task.assignee_id !== req.user.id) {
+  // Collect project members + manager as mention candidates
+  const members = await projectModel.listMembers(task.project_id);
+  const project = await projectModel.findById(task.project_id);
+  const candidates = [...members.map((m) => ({ id: m.user_id, name: m.name, email: m.email }))];
+  if (project?.manager_id && !candidates.some((c) => Number(c.id) === Number(project.manager_id))) {
+    const manager = await projectModel.findByIdWithManager(task.project_id);
+    if (manager?.manager_name) {
+      candidates.push({ id: project.manager_id, name: manager.manager_name, email: manager.manager_email });
+    }
+  }
+
+  const mentionedUserIds = extractMentionedUserIds(body, candidates, req.user.id);
+
+  // Send real-time 'mention' notification to everyone mentioned
+  for (const recipientId of mentionedUserIds) {
+    await notificationService.notify({
+      userId: recipientId,
+      type: 'mention',
+      title: 'Anda disebut dalam komentar',
+      message: `${req.user.name} menyebut Anda pada task "${task.title}"`,
+      link: `/tasks?task=${task.id}`,
+    });
+  }
+
+  // Also notify assignee if they exist, are not the author, and were not already mentioned
+  if (
+    task.assignee_id &&
+    task.assignee_id !== req.user.id &&
+    !mentionedUserIds.includes(Number(task.assignee_id))
+  ) {
     await notificationService.notify({
       userId: task.assignee_id,
-      type: 'mention',
+      type: 'task',
       title: 'Komentar baru',
       message: `${req.user.name} berkomentar pada task "${task.title}"`,
       link: `/tasks?task=${task.id}`,
@@ -1118,6 +1199,132 @@ const updateSchedule = asyncHandler(async (req, res) => {
   return sendSuccess(res, { task: updatedTask }, 'Jadwal task berhasil diperbarui');
 });
 
+// ---------------------------------------------------------------------------
+// Checklists
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/v1/tasks/:id/checklists
+ */
+const listChecklists = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  await loadViewableTask(req.user, id);
+
+  const checklists = await taskModel.listChecklists(id);
+  return sendSuccess(res, { checklists }, 'Berhasil memuat checklist');
+});
+
+/**
+ * POST /api/v1/tasks/:id/checklists
+ */
+const createChecklist = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const task = await loadEditableTask(req.user, id);
+  const { title } = req.body;
+
+  const position = (await taskModel.getMaxChecklistPosition(task.id)) + 1;
+  const checklistId = await taskModel.createChecklist({
+    task_id: task.id,
+    title,
+    position,
+    created_by: req.user.id,
+  });
+
+  const checklist = await taskModel.findChecklistById(checklistId);
+
+  await activityService.record({
+    userId: req.user.id,
+    projectId: task.project_id,
+    taskId: task.id,
+    action: 'task.checklist_created',
+    entityType: 'task',
+    entityId: task.id,
+    description: `${req.user.name} menambahkan checklist "${title}" pada task "${task.title}"`,
+    metadata: { checklist_id: checklistId, title },
+  });
+
+  const updated = await taskPayload(task.id);
+  socketService.emitTaskEvent(task.project_id, 'task:updated', {
+    task: updated,
+    projectId: Number(task.project_id),
+  });
+
+  return sendSuccess(res, { checklist }, 'Checklist berhasil ditambahkan');
+});
+
+/**
+ * PATCH /api/v1/tasks/:id/checklists/:checklistId
+ */
+const updateChecklist = asyncHandler(async (req, res) => {
+  const { id, checklistId } = req.params;
+  const task = await loadEditableTask(req.user, id);
+
+  const item = await taskModel.findChecklistById(checklistId);
+  if (!item || Number(item.task_id) !== Number(task.id)) {
+    throw ApiError.notFound('Item checklist tidak ditemukan');
+  }
+
+  await taskModel.updateChecklist(checklistId, req.body);
+  const checklist = await taskModel.findChecklistById(checklistId);
+
+  if (req.body.is_checked !== undefined && req.body.is_checked !== item.is_checked) {
+    await activityService.record({
+      userId: req.user.id,
+      projectId: task.project_id,
+      taskId: task.id,
+      action: req.body.is_checked ? 'task.checklist_completed' : 'task.checklist_uncompleted',
+      entityType: 'task',
+      entityId: task.id,
+      description: req.body.is_checked
+        ? `${req.user.name} menyelesaikan checklist "${item.title}" pada task "${task.title}"`
+        : `${req.user.name} membuka kembali checklist "${item.title}" pada task "${task.title}"`,
+      metadata: { checklist_id: checklistId },
+    });
+  }
+
+  const updated = await taskPayload(task.id);
+  socketService.emitTaskEvent(task.project_id, 'task:updated', {
+    task: updated,
+    projectId: Number(task.project_id),
+  });
+
+  return sendSuccess(res, { checklist }, 'Checklist berhasil diperbarui');
+});
+
+/**
+ * DELETE /api/v1/tasks/:id/checklists/:checklistId
+ */
+const deleteChecklist = asyncHandler(async (req, res) => {
+  const { id, checklistId } = req.params;
+  const task = await loadEditableTask(req.user, id);
+
+  const item = await taskModel.findChecklistById(checklistId);
+  if (!item || Number(item.task_id) !== Number(task.id)) {
+    throw ApiError.notFound('Item checklist tidak ditemukan');
+  }
+
+  await taskModel.deleteChecklist(checklistId);
+
+  await activityService.record({
+    userId: req.user.id,
+    projectId: task.project_id,
+    taskId: task.id,
+    action: 'task.checklist_deleted',
+    entityType: 'task',
+    entityId: task.id,
+    description: `${req.user.name} menghapus checklist "${item.title}" pada task "${task.title}"`,
+    metadata: { checklist_id: checklistId },
+  });
+
+  const updated = await taskPayload(task.id);
+  socketService.emitTaskEvent(task.project_id, 'task:updated', {
+    task: updated,
+    projectId: Number(task.project_id),
+  });
+
+  return sendSuccess(res, null, 'Checklist berhasil dihapus');
+});
+
 module.exports = {
   listTasks,
   getBoard,
@@ -1139,4 +1346,8 @@ module.exports = {
   listDependencies,
   createDependency,
   deleteDependency,
+  listChecklists,
+  createChecklist,
+  updateChecklist,
+  deleteChecklist,
 };

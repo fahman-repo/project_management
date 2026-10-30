@@ -16,9 +16,14 @@ import {
   ListChecks,
   Flag,
   CircleAlert,
+  CheckSquare,
+  Square,
+  Plus,
+  AtSign,
 } from 'lucide-react';
 import { cn } from '../../utils/cn';
 import { taskApi } from '../../api/task.api';
+import { projectApi } from '../../api/project.api';
 import { getErrorMessage } from '../../api/client';
 import { useAuthStore } from '../../store/authStore';
 import { Button, IconButton } from '../ui/Button';
@@ -29,6 +34,7 @@ import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { Spinner } from '../ui/Feedback';
 import { Dropdown, DropdownItem, DropdownLabel } from '../ui/Dropdown';
 import { TaskStatusBadge, PriorityBadge } from './Badges';
+import { CommentMarkdown } from './CommentMarkdown';
 import { DEPENDENCY_TYPES, TASK_STATUS, PRIORITY, lookup } from '../../utils/constants';
 import { formatDate, formatDateTime, formatRelative, formatCurrency, isOverdue } from '../../utils/formatters';
 
@@ -73,17 +79,47 @@ export function TaskDetailDrawer({ taskId, open, onClose, onEdit }) {
   const queryClient = useQueryClient();
   const currentUser = useAuthStore((state) => state.user);
   const fileInputRef = useRef(null);
+  const commentTextareaRef = useRef(null);
 
   const [commentBody, setCommentBody] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [dependencyTarget, setDependencyTarget] = useState('');
   const [dependencyType, setDependencyType] = useState('blocked_by');
 
+  // Checklist local state
+  const [newChecklistTitle, setNewChecklistTitle] = useState('');
+
+  // Mention autocomplete state
+  const [mentionQuery, setMentionQuery] = useState(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['task', taskId],
     queryFn: () => taskApi.get(taskId),
     enabled: Boolean(taskId) && open,
   });
+
+  // Project members for @mention autocomplete
+  const { data: membersResponse } = useQuery({
+    queryKey: ['project-members', data?.task?.project_id],
+    queryFn: () => projectApi.members(data.task.project_id),
+    enabled: Boolean(data?.task?.project_id) && open,
+    staleTime: 60 * 1000,
+  });
+
+  const projectMembers = membersResponse ?? [];
+
+  // Filter members matching the @mention query
+  const filteredMembers = useMemo(() => {
+    if (mentionQuery === null) return [];
+    const q = mentionQuery.toLowerCase();
+    return projectMembers.filter(
+      (m) =>
+        m.name.toLowerCase().includes(q) ||
+        (m.email && m.email.toLowerCase().includes(q)) ||
+        (m.job_title && m.job_title.toLowerCase().includes(q))
+    );
+  }, [projectMembers, mentionQuery]);
 
   // Candidate tasks for the dependency picker - only the current project.
   const { data: taskResponse } = useQuery({
@@ -100,6 +136,7 @@ export function TaskDetailDrawer({ taskId, open, onClose, onEdit }) {
   const reporter = data?.reporter;
   const labels = data?.labels ?? [];
   const subtasks = data?.subtasks ?? [];
+  const checklists = data?.checklists ?? [];
   const dependencies = data?.dependencies ?? [];
   const comments = data?.comments ?? [];
   const attachments = data?.attachments ?? [];
@@ -111,6 +148,9 @@ export function TaskDetailDrawer({ taskId, open, onClose, onEdit }) {
     setCommentBody('');
     setDependencyTarget('');
     setDependencyType('blocked_by');
+    setNewChecklistTitle('');
+    setMentionQuery(null);
+    setMentionIndex(0);
   }, [open, taskId]);
 
   const invalidate = () => {
@@ -120,6 +160,33 @@ export function TaskDetailDrawer({ taskId, open, onClose, onEdit }) {
   };
 
   // --- Mutations -----------------------------------------------------------
+  const addChecklistMutation = useMutation({
+    mutationFn: (title) => taskApi.addChecklist(taskId, { title }),
+    onSuccess: () => {
+      setNewChecklistTitle('');
+      invalidate();
+    },
+    onError: (err) => toast.error(getErrorMessage(err)),
+  });
+
+  const toggleChecklistMutation = useMutation({
+    mutationFn: ({ checklistId, is_checked }) =>
+      taskApi.updateChecklist(taskId, checklistId, { is_checked }),
+    onSuccess: () => {
+      invalidate();
+    },
+    onError: (err) => toast.error(getErrorMessage(err)),
+  });
+
+  const removeChecklistMutation = useMutation({
+    mutationFn: (checklistId) => taskApi.removeChecklist(taskId, checklistId),
+    onSuccess: () => {
+      toast.success('Item checklist dihapus');
+      invalidate();
+    },
+    onError: (err) => toast.error(getErrorMessage(err)),
+  });
+
   const addCommentMutation = useMutation({
     mutationFn: (body) => taskApi.addComment(taskId, body),
     onSuccess: () => {
@@ -193,6 +260,10 @@ export function TaskDetailDrawer({ taskId, open, onClose, onEdit }) {
   // --- Derived data --------------------------------------------------------
   const subtaskDone = subtasks.filter((item) => item.status === 'done').length;
   const subtaskPercent = subtasks.length ? Math.round((subtaskDone / subtasks.length) * 100) : 0;
+  const checklistDone = checklists.filter((item) => item.is_checked).length;
+  const checklistPercent = checklists.length
+    ? Math.round((checklistDone / checklists.length) * 100)
+    : 0;
   const overdue = isOverdue(task);
   const statusMeta = lookup(TASK_STATUS, task?.status);
   const priorityMeta = lookup(PRIORITY, task?.priority);
@@ -201,6 +272,66 @@ export function TaskDetailDrawer({ taskId, open, onClose, onEdit }) {
     () => (taskResponse?.data ?? []).filter((item) => Number(item.id) !== Number(taskId)),
     [taskResponse, taskId]
   );
+
+  const insertMention = (member) => {
+    const textarea = commentTextareaRef.current;
+    if (!textarea) return;
+    const text = commentBody;
+    const pos = textarea.selectionStart;
+    const beforePos = text.slice(0, pos);
+    const afterPos = text.slice(pos);
+    const atIndex = beforePos.lastIndexOf('@');
+    if (atIndex !== -1) {
+      const inserted = `@[${member.name}] `;
+      const newText = beforePos.slice(0, atIndex) + inserted + afterPos;
+      setCommentBody(newText);
+      setMentionQuery(null);
+      setTimeout(() => {
+        const newPos = atIndex + inserted.length;
+        textarea.focus();
+        textarea.setSelectionRange(newPos, newPos);
+      }, 10);
+    }
+  };
+
+  const handleCommentChange = (event) => {
+    const val = event.target.value;
+    setCommentBody(val);
+    const pos = event.target.selectionStart;
+    const beforePos = val.slice(0, pos);
+    const match = beforePos.match(/(?:^|\s)@([a-zA-Z0-9._-]*)$/);
+    if (match) {
+      setMentionQuery(match[1]);
+      setMentionIndex(0);
+    } else {
+      setMentionQuery(null);
+    }
+  };
+
+  const handleCommentKeyDown = (event) => {
+    if (mentionQuery !== null && filteredMembers.length > 0) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setMentionIndex((prev) => (prev + 1) % filteredMembers.length);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setMentionIndex((prev) => (prev - 1 + filteredMembers.length) % filteredMembers.length);
+        return;
+      }
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        event.preventDefault();
+        insertMention(filteredMembers[mentionIndex]);
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setMentionQuery(null);
+        return;
+      }
+    }
+  };
 
   const handleUpload = (event) => {
     const file = event.target.files?.[0];
@@ -428,6 +559,108 @@ export function TaskDetailDrawer({ taskId, open, onClose, onEdit }) {
               </dl>
             </section>
 
+            {/* --- Checklist Sub-item --- */}
+            <section>
+              <div className="flex items-center justify-between gap-3">
+                <h4 className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white">
+                  <CheckSquare className="h-4 w-4 text-brand-500" />
+                  Checklist
+                </h4>
+                {checklists.length > 0 && (
+                  <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                    {checklistDone}/{checklists.length} selesai ({checklistPercent}%)
+                  </span>
+                )}
+              </div>
+
+              {checklists.length > 0 && (
+                <ProgressBar value={checklistPercent} size="xs" className="mt-2" />
+              )}
+
+              {checklists.length > 0 && (
+                <ul className="mt-2.5 space-y-1.5">
+                  {checklists.map((item) => (
+                    <li
+                      key={item.id}
+                      className={cn(
+                        'group flex items-center justify-between gap-2.5 rounded-lg border px-3 py-2 transition-colors',
+                        item.is_checked
+                          ? 'border-slate-200 bg-slate-50/50 dark:border-slate-800 dark:bg-slate-900/40'
+                          : 'border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900/80'
+                      )}
+                    >
+                      <button
+                        type="button"
+                        onClick={() =>
+                          toggleChecklistMutation.mutate({
+                            checklistId: item.id,
+                            is_checked: !item.is_checked,
+                          })
+                        }
+                        className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+                      >
+                        {item.is_checked ? (
+                          <CheckSquare className="h-4 w-4 shrink-0 text-emerald-500" />
+                        ) : (
+                          <Square className="h-4 w-4 shrink-0 text-slate-400 group-hover:text-slate-600 dark:group-hover:text-slate-300" />
+                        )}
+                        <span
+                          className={cn(
+                            'truncate text-sm transition-colors',
+                            item.is_checked
+                              ? 'text-slate-400 line-through dark:text-slate-500'
+                              : 'text-slate-700 dark:text-slate-200'
+                          )}
+                        >
+                          {item.title}
+                        </span>
+                      </button>
+
+                      <IconButton
+                        label="Hapus item checklist"
+                        size="icon-sm"
+                        variant="ghost"
+                        onClick={() => removeChecklistMutation.mutate(item.id)}
+                        disabled={removeChecklistMutation.isPending}
+                        className="opacity-0 transition-opacity group-hover:opacity-100"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </IconButton>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {/* Quick-add checklist item form */}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const title = newChecklistTitle.trim();
+                  if (!title) return;
+                  addChecklistMutation.mutate(title);
+                }}
+                className="mt-2.5 flex items-center gap-2"
+              >
+                <input
+                  type="text"
+                  value={newChecklistTitle}
+                  onChange={(e) => setNewChecklistTitle(e.target.value)}
+                  placeholder="Tambah item checklist baru..."
+                  className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500/20 dark:border-slate-700 dark:bg-slate-950/50 dark:text-slate-100"
+                />
+                <Button
+                  type="submit"
+                  size="sm"
+                  variant="secondary"
+                  disabled={!newChecklistTitle.trim()}
+                  loading={addChecklistMutation.isPending}
+                  leftIcon={<Plus className="h-3.5 w-3.5" />}
+                >
+                  Tambah
+                </Button>
+              </form>
+            </section>
+
             {/* --- Sub-tasks --- */}
             <section>
               <div className="flex items-center justify-between gap-3">
@@ -576,9 +809,9 @@ export function TaskDetailDrawer({ taskId, open, onClose, onEdit }) {
                               </IconButton>
                             )}
                           </div>
-                          <p className="mt-0.5 whitespace-pre-wrap text-sm leading-relaxed text-slate-600 dark:text-slate-300">
-                            {comment.body}
-                          </p>
+                          <div className="mt-1">
+                            <CommentMarkdown content={comment.body} />
+                          </div>
                         </div>
                       </li>
                     );
@@ -586,24 +819,64 @@ export function TaskDetailDrawer({ taskId, open, onClose, onEdit }) {
                 </ul>
               )}
 
-              <form onSubmit={handleAddComment} className="mt-4 flex items-end gap-2">
-                <textarea
-                  value={commentBody}
-                  onChange={(event) => setCommentBody(event.target.value)}
-                  rows={2}
-                  placeholder="Tulis komentar..."
-                  className="flex-1 resize-y rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20 dark:border-slate-700 dark:bg-slate-950/50 dark:text-slate-100"
-                />
-                <Button
-                  type="submit"
-                  size="icon"
-                  aria-label="Kirim komentar"
-                  loading={addCommentMutation.isPending}
-                  disabled={!commentBody.trim()}
-                >
-                  <Send className="h-4 w-4" />
-                </Button>
-              </form>
+              <div className="relative mt-4">
+                {/* Autocomplete mention popover */}
+                {mentionQuery !== null && filteredMembers.length > 0 && (
+                  <div className="absolute bottom-full left-0 z-20 mb-2 max-h-48 w-64 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-lg dark:border-slate-800 dark:bg-slate-900">
+                    <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                      Sebut Anggota Proyek
+                    </div>
+                    {filteredMembers.map((member, i) => (
+                      <button
+                        key={member.user_id || member.id}
+                        type="button"
+                        onClick={() => insertMention(member)}
+                        className={cn(
+                          'flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors',
+                          i === mentionIndex
+                            ? 'bg-brand-50 text-brand-700 dark:bg-brand-500/20 dark:text-brand-300'
+                            : 'text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800'
+                        )}
+                      >
+                        <Avatar src={member.avatar} name={member.name} size="xs" />
+                        <div className="min-w-0 flex-1 truncate">
+                          <p className="truncate font-medium">{member.name}</p>
+                          {member.email && (
+                            <p className="truncate text-[10px] text-slate-400">{member.email}</p>
+                          )}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <form onSubmit={handleAddComment} className="flex items-start gap-2">
+                  <div className="relative flex-1">
+                    <textarea
+                      ref={commentTextareaRef}
+                      value={commentBody}
+                      onChange={handleCommentChange}
+                      onKeyDown={handleCommentKeyDown}
+                      rows={2}
+                      placeholder="Tulis komentar... (Ketik @ untuk mention anggota)"
+                      className="w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20 dark:border-slate-700 dark:bg-slate-950/50 dark:text-slate-100"
+                    />
+                    <div className="mt-1 flex items-center justify-between text-[11px] text-slate-400 dark:text-slate-500">
+                      <span>Ketik <strong>@</strong> untuk mention tim &bull; Mendukung **tebal**, *miring*, `kode`</span>
+                    </div>
+                  </div>
+                  <Button
+                    type="submit"
+                    size="icon"
+                    aria-label="Kirim komentar"
+                    loading={addCommentMutation.isPending}
+                    disabled={!commentBody.trim()}
+                    className="mt-0.5"
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                </form>
+              </div>
             </section>
 
             {/* --- Lampiran --- */}

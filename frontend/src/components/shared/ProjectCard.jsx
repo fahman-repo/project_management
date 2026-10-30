@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { CalendarDays, MoreVertical, Users, Trash2, Pencil } from 'lucide-react';
 import { Card } from '../ui/Card';
 import { ProgressBar } from '../ui/ProgressBar';
@@ -13,12 +13,17 @@ import { PROJECT_STATUS } from '../../utils/constants';
  * Project card used in the projects grid.
  */
 export function ProjectCard({ project, onEdit, onDelete, canManage = false }) {
+  const navigate = useNavigate();
   const statusMeta = PROJECT_STATUS[project.status] || PROJECT_STATUS.planning;
 
   const members = project.members || [];
 
   return (
-    <Card hover className="group flex h-full flex-col">
+    <Card
+      hover
+      className="group flex h-full flex-col cursor-pointer transition-all hover:shadow-md hover:border-brand-200 dark:hover:border-brand-800"
+      onClick={() => navigate(`/projects/${project.id}`)}
+    >
       <div className="flex items-start justify-between gap-3 p-5 pb-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -32,33 +37,36 @@ export function ProjectCard({ project, onEdit, onDelete, canManage = false }) {
           </div>
           <Link
             to={`/projects/${project.id}`}
-            className="mt-1.5 block truncate text-base font-semibold text-slate-900 transition-colors hover:text-brand-600 dark:text-white dark:hover:text-brand-400"
+            onClick={(e) => e.stopPropagation()}
+            className="mt-1.5 block truncate text-base font-semibold text-slate-900 transition-colors group-hover:text-brand-600 dark:text-white dark:group-hover:text-brand-400"
           >
             {project.name}
           </Link>
         </div>
 
         {canManage && (
-          <Dropdown
-            align="right"
-            trigger={
-              <button
-                type="button"
-                aria-label="Aksi project"
-                className="rounded-lg p-1.5 text-slate-400 opacity-0 transition-opacity hover:bg-slate-100 hover:text-slate-600 focus-ring group-hover:opacity-100 focus:opacity-100 dark:hover:bg-slate-800"
-              >
-                <MoreVertical className="h-4 w-4" />
-              </button>
-            }
-          >
-            <DropdownItem icon={Pencil} onClick={() => onEdit?.(project)}>
-              Edit Project
-            </DropdownItem>
-            <DropdownSeparator />
-            <DropdownItem icon={Trash2} danger onClick={() => onDelete?.(project)}>
-              Hapus Project
-            </DropdownItem>
-          </Dropdown>
+          <div onClick={(e) => e.stopPropagation()}>
+            <Dropdown
+              align="right"
+              trigger={
+                <button
+                  type="button"
+                  aria-label="Aksi project"
+                  className="rounded-lg p-1.5 text-slate-400 opacity-0 transition-opacity hover:bg-slate-100 hover:text-slate-600 focus-ring group-hover:opacity-100 focus:opacity-100 dark:hover:bg-slate-800"
+                >
+                  <MoreVertical className="h-4 w-4" />
+                </button>
+              }
+            >
+              <DropdownItem icon={Pencil} onClick={() => onEdit?.(project)}>
+                Edit Project
+              </DropdownItem>
+              <DropdownSeparator />
+              <DropdownItem icon={Trash2} danger onClick={() => onDelete?.(project)}>
+                Hapus Project
+              </DropdownItem>
+            </Dropdown>
+          </div>
         )}
       </div>
 
@@ -112,7 +120,12 @@ export function ProjectCard({ project, onEdit, onDelete, canManage = false }) {
           </span>
         </div>
 
-        <AvatarGroup users={members.slice(0, 4)} max={3} size="xs" />
+        <div className="flex items-center gap-2">
+          <AvatarGroup users={members.slice(0, 4)} max={2} size="xs" />
+          <span className="inline-flex items-center text-xs font-semibold text-brand-600 group-hover:translate-x-0.5 transition-transform dark:text-brand-400">
+            Detail &rarr;
+          </span>
+        </div>
       </div>
     </Card>
   );

@@ -36,6 +36,7 @@ const NOW = dayjs();
 const DAY = 24 * 60 * 60 * 1000;
 
 const TABLES = [
+  'project_risks',
   'task_attachments',
   'project_expenses',
   'task_comments',
@@ -1625,19 +1626,211 @@ async function seedProjectExpenses(connection, projectIds, userIds, tasks) {
       exp.cat,
       exp.amount,
       expenseDate,
+      'approved',
       exp.vendor,
       `Invoice #INV-2026-${1000 + i}`,
       adminId,
+      adminId,
+      expenseDate,
     ]);
   });
 
   await bulkInsert(
     connection,
     'project_expenses',
-    ['project_id', 'task_id', 'title', 'category', 'amount', 'expense_date', 'vendor_name', 'receipt_note', 'created_by'],
+    [
+      'project_id',
+      'task_id',
+      'title',
+      'category',
+      'amount',
+      'expense_date',
+      'status',
+      'vendor_name',
+      'receipt_note',
+      'created_by',
+      'approved_by',
+      'approved_at',
+    ],
     rows
   );
   log(`project_expenses : ${rows.length} catatan pengeluaran dibuat.`);
+}
+
+async function seedProjectRisks(connection, projectIds, userIds, tasks, membersByProject) {
+  const adminId = userIds.admin || Object.values(userIds)[0];
+  const rows = [];
+
+  const sampleRisks = [
+    {
+      type: 'risk',
+      title: 'Keterlambatan pengiriman material dan komponen impor',
+      description: 'Gangguan rantai pasok global dan keterlambatan izin bea cukai dapat menghambat pekerjaan instalasi.',
+      category: 'external',
+      prob: 3,
+      imp: 4,
+      mitigation: 'Melakukan pemesanan cadangan dengan vendor lokal alternatif dan mengajukan perizinan 3 minggu lebih awal.',
+      contingency: 'Mengalihkan urutan pengerjaan task non-dependen terlebih dahulu sambil menunggu logistik tiba.',
+      status: 'mitigating',
+      target_days: 14,
+    },
+    {
+      type: 'issue',
+      title: 'Ketidaksesuaian spesifikasi API pihak ketiga',
+      description: 'Dokumentasi payment gateway tidak selaras dengan response staging server terbaru, menyebabkan integrasi error 500.',
+      category: 'technical',
+      prob: 4,
+      imp: 4,
+      mitigation: 'Mengadakan meeting sinkronisasi teknis darurat dengan lead developer vendor payment.',
+      contingency: 'Membuat wrapper adapter internal untuk memetakan response payload yang tidak konsisten.',
+      status: 'analyzing',
+      target_days: 5,
+    },
+    {
+      type: 'risk',
+      title: 'Potensi lonjakan beban server saat peluncuran publik',
+      description: 'Lonjakan traffic pengguna bersamaan diprediksi melebihi kapasitas arsitektur cluster tunggal.',
+      category: 'technical',
+      prob: 4,
+      imp: 5,
+      mitigation: 'Implementasi load balancer, CDN caching untuk aset statis, dan stress testing beban 5x lipat.',
+      contingency: 'Menyiapkan auto-scaling rule pada cloud server dan mode maintenance darurat.',
+      status: 'identified',
+      target_days: 25,
+    },
+    {
+      type: 'risk',
+      title: 'Fluktuasi harga material konstruksi & kurs valuta asing',
+      description: 'Kenaikan harga bahan baku utama berisiko menyebabkan pembengkakan anggaran (cost overrun).',
+      category: 'budget',
+      prob: 3,
+      imp: 3,
+      mitigation: 'Mengunci kontrak harga tetap (fixed-price contract) dengan supplier utama selama 6 bulan.',
+      contingency: 'Mengajukan realokasi pos biaya kontingensi proyek sebesar 5%.',
+      status: 'monitoring',
+      target_days: 45,
+    },
+    {
+      type: 'risk',
+      title: 'Kekurangan tenaga ahli spesialis backend & devops',
+      description: 'Turnover karyawan dan sulitnya rekrutmen spesialis berpengalaman di tengah sprint kritis.',
+      category: 'resource',
+      prob: 2,
+      imp: 4,
+      mitigation: 'Menyediakan program insentif sprint dan pelatihan silang (cross-training) internal tim.',
+      contingency: 'Merekrut konsultan eksternal temporer untuk mendampingi arsitektur infrastruktur.',
+      status: 'mitigating',
+      target_days: 30,
+    },
+    {
+      type: 'issue',
+      title: 'Perubahan regulasi privasi data pengguna dari regulator',
+      description: 'Regulator mengeluarkan pedoman baru yang mewajibkan audit kepatuhan enkripsi data sebelum go-live.',
+      category: 'scope',
+      prob: 5,
+      imp: 4,
+      mitigation: 'Menyesuaikan skema enkripsi database dan memperbarui syarat & ketentuan layanan.',
+      contingency: 'Melibatkan konsultan hukum data compliance untuk verifikasi sertifikasi.',
+      status: 'mitigating',
+      target_days: 10,
+    },
+    {
+      type: 'risk',
+      title: 'Kendala cuaca ekstrem pada pekerjaan lapangan',
+      description: 'Musim hujan intensitas tinggi berpotensi menunda pekerjaan galian tanah dan pengecoran pondasi.',
+      category: 'schedule',
+      prob: 4,
+      imp: 3,
+      mitigation: 'Memasang terpal pelindung area galian dan menyiapkan pompa dewatering cadangan.',
+      contingency: 'Menambah jam kerja shift malam pada hari-hari dengan cuaca cerah.',
+      status: 'resolved',
+      target_days: -5,
+    },
+  ];
+
+  const projectKeyList = Object.keys(projectIds);
+
+  projectKeyList.forEach((pKey, pIdx) => {
+    const pId = projectIds[pKey];
+    const pTasks = tasks.filter((t) => t.projectId === pId);
+    const pMembers = membersByProject[pId] || [adminId];
+
+    const riskSubset = [
+      sampleRisks[pIdx % sampleRisks.length],
+      sampleRisks[(pIdx + 2) % sampleRisks.length],
+      sampleRisks[(pIdx + 4) % sampleRisks.length],
+    ];
+
+    riskSubset.forEach((item, rIdx) => {
+      const code = `${item.type === 'issue' ? 'ISS' : 'RSK'}-${String(rIdx + 1).padStart(3, '0')}`;
+      const prob = item.prob;
+      const imp = item.imp;
+      const score = prob * imp;
+      let severity = 'low';
+      if (score >= 16) severity = 'critical';
+      else if (score >= 10) severity = 'high';
+      else if (score >= 5) severity = 'medium';
+
+      const ownerId = pMembers.length ? pMembers[rIdx % pMembers.length] : adminId;
+      const linkedTask = pTasks.length ? pTasks[rIdx % pTasks.length].id : null;
+      const targetDate = fmtDate(NOW.add(item.target_days, 'day'));
+      const isResolved = item.status === 'resolved' || item.status === 'closed';
+      const resolvedAt = isResolved ? fmtDateTime(NOW.subtract(2, 'day')) : null;
+      const createdAt = fmtDateTime(NOW.subtract(intBetween(10, 50), 'day'));
+
+      rows.push([
+        pId,
+        code,
+        item.type,
+        item.title,
+        item.description,
+        item.category,
+        prob,
+        imp,
+        score,
+        severity,
+        item.mitigation,
+        item.contingency,
+        item.status,
+        ownerId,
+        linkedTask,
+        targetDate,
+        resolvedAt,
+        adminId,
+        createdAt,
+        createdAt,
+      ]);
+    });
+  });
+
+  await bulkInsert(
+    connection,
+    'project_risks',
+    [
+      'project_id',
+      'code',
+      'type',
+      'title',
+      'description',
+      'category',
+      'probability',
+      'impact',
+      'risk_score',
+      'severity',
+      'mitigation_plan',
+      'contingency_plan',
+      'status',
+      'owner_id',
+      'linked_task_id',
+      'target_date',
+      'resolved_at',
+      'created_by',
+      'created_at',
+      'updated_at',
+    ],
+    rows
+  );
+  log(`project_risks    : ${rows.length} catatan risiko & masalah dibuat.`);
 }
 
 async function seedActivities(connection, tasks, projectIds, userIds) {
@@ -1850,6 +2043,8 @@ async function printSummary() {
      UNION ALL SELECT 'milestones', COUNT(*) FROM milestones
      UNION ALL SELECT 'task_comments', COUNT(*) FROM task_comments
      UNION ALL SELECT 'task_attachments', COUNT(*) FROM task_attachments
+     UNION ALL SELECT 'project_expenses', COUNT(*) FROM project_expenses
+     UNION ALL SELECT 'project_risks', COUNT(*) FROM project_risks
      UNION ALL SELECT 'activities', COUNT(*) FROM activities
      UNION ALL SELECT 'notifications', COUNT(*) FROM notifications
      UNION ALL SELECT 'project_templates', COUNT(*) FROM project_templates
@@ -1917,6 +2112,8 @@ async function main() {
     await seedMilestones(connection, projectIds, userIds);
     await seedComments(connection, tasks, membersByProject);
     await seedAttachments(connection, tasks, membersByProject);
+    await seedProjectExpenses(connection, projectIds, userIds, tasks);
+    await seedProjectRisks(connection, projectIds, userIds, tasks, membersByProject);
     await seedActivities(connection, tasks, projectIds, userIds);
     await seedNotifications(connection, tasks, projectIds, userIds);
   } finally {

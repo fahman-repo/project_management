@@ -139,6 +139,10 @@ async function main() {
 
     const milestones = await request(`/projects/${project.id}/milestones`, { token });
     check('GET /projects/:id/milestones works', milestones.status === 200, milestones.body);
+
+    const documents = await request(`/projects/${project.id}/documents`, { token });
+    check('GET /projects/:id/documents works', documents.status === 200, documents.body);
+    check('documents response has summary', Boolean(documents.body?.data?.summary), documents.body?.data);
   }
 
   // --- Tasks --------------------------------------------------------------
@@ -231,6 +235,14 @@ async function main() {
 
   const workload = await request('/dashboard/workload', { token });
   check('GET /dashboard/workload works', workload.status === 200, workload.body);
+  check('workload exposes weeklyCapacityHours', Boolean(workload.body?.data?.[0]?.weeklyCapacityHours), workload.body?.data?.[0]);
+  check('workload exposes currentWeekHours', workload.body?.data?.[0]?.currentWeekHours !== undefined, workload.body?.data?.[0]);
+
+  const heatmap = await request('/dashboard/capacity-heatmap?weeks=8', { token });
+  check('GET /dashboard/capacity-heatmap works', heatmap.status === 200, heatmap.body);
+  check('heatmap returns 8 weeks', heatmap.body?.data?.weeks?.length === 8, heatmap.body?.data?.weeks?.length);
+  check('heatmap returns members with cells', Array.isArray(heatmap.body?.data?.members?.[0]?.cells), heatmap.body?.data?.members?.[0]);
+  check('heatmap exposes summary', Boolean(heatmap.body?.data?.summary?.totalMembers), heatmap.body?.data?.summary);
 
   // --- Reports ------------------------------------------------------------
   log('');

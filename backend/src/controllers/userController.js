@@ -48,7 +48,7 @@ const getUser = asyncHandler(async (req, res) => {
  * POST /api/v1/users
  */
 const createUser = asyncHandler(async (req, res) => {
-  const { name, email, password, role, phone, job_title, bio } = req.body;
+  const { name, email, password, role, phone, job_title, bio, weekly_capacity_hours } = req.body;
 
   const existing = await userModel.findByEmail(email);
   if (existing) throw ApiError.conflict('Email tersebut sudah terdaftar');
@@ -62,6 +62,7 @@ const createUser = asyncHandler(async (req, res) => {
     phone: phone || null,
     job_title: job_title || null,
     bio: bio || null,
+    weekly_capacity_hours: weekly_capacity_hours ? Number(weekly_capacity_hours) : 40,
   });
 
   const user = await userModel.findById(userId);

@@ -12,6 +12,7 @@ import {
   Percent,
   Wallet,
   TrendingUp,
+  FileText,
 } from 'lucide-react';
 import { reportApi } from '../api';
 import { projectApi } from '../api/project.api';
@@ -29,6 +30,8 @@ import { StatusPieChart } from '../components/charts/StatusPieChart';
 import { ProductivityBarChart } from '../components/charts/ProductivityBarChart';
 import { TrendAreaChart } from '../components/charts/TrendAreaChart';
 import { BurndownChart } from '../components/charts/BurndownChart';
+import { SCurveEvmChart } from '../components/charts/SCurveEvmChart';
+import { ExecutiveReportModal } from '../components/shared/ExecutiveReportModal';
 import { formatNumber, formatCurrency } from '../utils/formatters';
 import { PROJECT_STATUS, lookup } from '../utils/constants';
 import { cn } from '../utils/cn';
@@ -64,6 +67,9 @@ export default function Reports() {
   const [projectId, setProjectId] = useState('');
   const [trendDays, setTrendDays] = useState(30);
   const [burndownProjectId, setBurndownProjectId] = useState('');
+  const [evmProjectId, setEvmProjectId] = useState('');
+  const [evmInterval, setEvmInterval] = useState('daily');
+  const [executiveModalOpen, setExecutiveModalOpen] = useState(false);
 
   // Projects used by the filter dropdowns.
   const { data: projectList } = useQuery({
@@ -77,6 +83,10 @@ export default function Reports() {
     value: String(project.id),
     label: `${project.code ? `${project.code} - ` : ''}${project.name}`,
   }));
+
+  const defaultProjectId = projectId || (projects.length ? String(projects[0].id) : '');
+  const activeEvmProjectId = evmProjectId || defaultProjectId;
+  const activeBurndownProjectId = burndownProjectId || defaultProjectId;
 
   const scopeParams = useMemo(
     () => ({
@@ -112,9 +122,21 @@ export default function Reports() {
   });
 
   const burndownQuery = useQuery({
-    queryKey: ['reports', 'burndown', burndownProjectId],
-    queryFn: () => reportApi.burndown({ project_id: burndownProjectId }),
-    enabled: Boolean(burndownProjectId),
+    queryKey: ['reports', 'burndown', activeBurndownProjectId],
+    queryFn: () => reportApi.burndown({ project_id: activeBurndownProjectId }),
+    enabled: Boolean(activeBurndownProjectId),
+  });
+
+  const evmQuery = useQuery({
+    queryKey: ['reports', 'evm', activeEvmProjectId, from, to, evmInterval],
+    queryFn: () =>
+      reportApi.evm({
+        project_id: activeEvmProjectId,
+        from: from || undefined,
+        to: to || undefined,
+        interval: evmInterval,
+      }),
+    enabled: Boolean(activeEvmProjectId),
   });
 
   const exportMutation = useMutation({
@@ -187,36 +209,51 @@ export default function Reports() {
         title="Reports"
         description="Ringkasan performa proyek dan task beserta grafik analitik"
         action={
-          <Dropdown
-            align="right"
-            trigger={
-              <Button
-                variant="secondary"
-                leftIcon={<Download className="h-4 w-4" />}
-                loading={exportMutation.isPending}
+          <div className="flex items-center gap-2">
+            <Button
+              variant="primary"
+              leftIcon={<FileText className="h-4 w-4" />}
+              onClick={() => setExecutiveModalOpen(true)}
+            >
+              Laporan Eksekutif (PDF)
+            </Button>
+            <Dropdown
+              align="right"
+              trigger={
+                <Button
+                  variant="secondary"
+                  leftIcon={<Download className="h-4 w-4" />}
+                  loading={exportMutation.isPending}
+                >
+                  Export CSV
+                </Button>
+              }
+            >
+              <DropdownLabel>Unduh laporan</DropdownLabel>
+              <DropdownItem
+                icon={FileSpreadsheet}
+                onClick={() => exportMutation.mutate('tasks')}
               >
-                Export CSV
-              </Button>
-            }
-          >
-            <DropdownLabel>Unduh laporan</DropdownLabel>
-            <DropdownItem
-              icon={FileSpreadsheet}
-              onClick={() => exportMutation.mutate('tasks')}
-            >
-              Export Task
-            </DropdownItem>
-            <DropdownItem
-              icon={FileSpreadsheet}
-              onClick={() => exportMutation.mutate('projects')}
-            >
-              Export Project
-            </DropdownItem>
-            <DropdownSeparator />
-            <DropdownItem icon={CalendarRange} onClick={() => setTrendDays(30)}>
-              Reset filter tanggal
-            </DropdownItem>
-          </Dropdown>
+                Export Task
+              </DropdownItem>
+              <DropdownItem
+                icon={FileSpreadsheet}
+                onClick={() => exportMutation.mutate('projects')}
+              >
+                Export Project
+              </DropdownItem>
+              <DropdownSeparator />
+              <DropdownItem
+                icon={FileText}
+                onClick={() => setExecutiveModalOpen(true)}
+              >
+                Laporan Eksekutif (PDF)
+              </DropdownItem>
+              <DropdownItem icon={CalendarRange} onClick={() => setTrendDays(30)}>
+                Reset filter tanggal
+              </DropdownItem>
+            </Dropdown>
+          </div>
         }
       />
 
@@ -341,6 +378,54 @@ export default function Reports() {
             </CardBody>
           </Card>
 
+          {/* S-Curve & EVM Section */}
+          <Card>
+            <CardHeader
+              title="Kurva-S & Earned Value Management (EVM)"
+              description="Perbandingan nilai rencana (PV), progres bobot riil (EV), dan realisasi biaya (AC) beserta indeks performa CPI/SPI"
+              action={
+                <div className="flex flex-wrap items-center gap-2">
+                  <Select
+                    options={projectOptions}
+                    placeholder="Pilih Project"
+                    value={activeEvmProjectId}
+                    onChange={(event) => setEvmProjectId(event.target.value)}
+                    containerClassName="w-56"
+                    className="h-9 py-1.5 text-xs"
+                  />
+                  <Select
+                    options={[
+                      { value: 'daily', label: 'Interval: Harian' },
+                      { value: 'weekly', label: 'Interval: Mingguan' },
+                    ]}
+                    value={evmInterval}
+                    onChange={(event) => setEvmInterval(event.target.value)}
+                    containerClassName="w-36"
+                    className="h-9 py-1.5 text-xs"
+                  />
+                </div>
+              }
+            />
+            <CardBody>
+              {!activeEvmProjectId ? (
+                <EmptyState
+                  icon={TrendingUp}
+                  title="Pilih project untuk melihat Kurva-S & EVM"
+                  description="Grafik Kurva-S dan indikator EVM membutuhkan satu project acuan."
+                />
+              ) : evmQuery.isLoading ? (
+                <LoadingState label="Menghitung Kurva-S & EVM..." />
+              ) : evmQuery.isError ? (
+                <ErrorState
+                  description={getErrorMessage(evmQuery.error)}
+                  onRetry={() => evmQuery.refetch()}
+                />
+              ) : (
+                <SCurveEvmChart data={evmQuery.data} />
+              )}
+            </CardBody>
+          </Card>
+
           {/* Charts */}
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
             <Card>
@@ -408,7 +493,7 @@ export default function Reports() {
                   <Select
                     options={projectOptions}
                     placeholder="Pilih Project"
-                    value={burndownProjectId}
+                    value={activeBurndownProjectId}
                     onChange={(event) => setBurndownProjectId(event.target.value)}
                     containerClassName="w-56"
                     className="h-9 py-1.5 text-xs"
@@ -416,7 +501,7 @@ export default function Reports() {
                 }
               />
               <CardBody>
-                {!burndownProjectId ? (
+                {!activeBurndownProjectId ? (
                   <EmptyState
                     icon={BarChart3}
                     title="Pilih project untuk melihat burndown"
@@ -510,6 +595,15 @@ export default function Reports() {
           </Card>
         </div>
       )}
+
+      {/* Modal Cetak / Ekspor PDF Laporan Eksekutif */}
+      <ExecutiveReportModal
+        open={executiveModalOpen}
+        onClose={() => setExecutiveModalOpen(false)}
+        projectId={projectId || activeEvmProjectId}
+        from={from}
+        to={to}
+      />
     </div>
   );
 }

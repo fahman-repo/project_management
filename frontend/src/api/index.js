@@ -8,6 +8,8 @@ export const dashboardApi = {
   myTasks: () => api.get('/dashboard/my-tasks').then((res) => res.data.data),
   projectProgress: () => api.get('/dashboard/project-progress').then((res) => res.data.data),
   workload: () => api.get('/dashboard/workload').then((res) => res.data.data),
+  capacityHeatmap: (params) =>
+    api.get('/dashboard/capacity-heatmap', { params }).then((res) => res.data.data),
 };
 
 /**
@@ -19,6 +21,8 @@ export const reportApi = {
     api.get('/reports/status-distribution', { params }).then((res) => res.data.data),
   productivity: (params) => api.get('/reports/productivity', { params }).then((res) => res.data.data),
   burndown: (params) => api.get('/reports/burndown', { params }).then((res) => res.data.data),
+  evm: (params) => api.get('/reports/evm', { params }).then((res) => res.data.data),
+  executive: (params) => api.get('/reports/executive', { params }).then((res) => res.data.data),
   completionTrend: (params) =>
     api.get('/reports/completion-trend', { params }).then((res) => res.data.data),
 
@@ -121,4 +125,14 @@ export const labelApi = {
   create: (payload) => api.post('/labels', payload).then((res) => res.data.data),
   update: (id, payload) => api.patch(`/labels/${id}`, payload).then((res) => res.data.data),
   remove: (id) => api.delete(`/labels/${id}`).then((res) => res.data.data),
+};
+
+/**
+ * Global Search endpoint (Ctrl+K).
+ */
+export const searchApi = {
+  /**
+   * @param {{q:string, limit?:number}} params
+   */
+  global: (params) => api.get('/search', { params }).then((res) => res.data.data),
 };

@@ -21,6 +21,9 @@ const {
   taskCommentParams,
   taskAttachmentParams,
   taskDependencyParams,
+  taskChecklistParams,
+  createChecklistSchema,
+  updateChecklistSchema,
 } = require('../validators/task.validator');
 
 const router = express.Router();
@@ -74,6 +77,23 @@ router.delete(
   '/:id/dependencies/:dependencyId',
   validate({ params: taskDependencyParams }),
   controller.deleteDependency
+);
+
+router.get('/:id/checklists', validate({ params: taskIdParams }), controller.listChecklists);
+router.post(
+  '/:id/checklists',
+  validate({ params: taskIdParams, body: createChecklistSchema }),
+  controller.createChecklist
+);
+router.patch(
+  '/:id/checklists/:checklistId',
+  validate({ params: taskChecklistParams, body: updateChecklistSchema }),
+  controller.updateChecklist
+);
+router.delete(
+  '/:id/checklists/:checklistId',
+  validate({ params: taskChecklistParams }),
+  controller.deleteChecklist
 );
 
 module.exports = router;

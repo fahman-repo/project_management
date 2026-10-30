@@ -126,19 +126,42 @@ export const projectApi = {
   /**
    * Create an expense entry for a project.
    * @param {number} id
-   * @param {object} payload
+   * @param {object|FormData} payload
    */
-  createExpense: (id, payload) =>
-    api.post(`/projects/${id}/expenses`, payload).then((res) => res.data.data),
+  createExpense: (id, payload) => {
+    const isFormData = typeof FormData !== 'undefined' && payload instanceof FormData;
+    return api
+      .post(`/projects/${id}/expenses`, payload, {
+        headers: isFormData ? { 'Content-Type': 'multipart/form-data' } : undefined,
+      })
+      .then((res) => res.data.data);
+  },
 
   /**
    * Update an expense entry.
    * @param {number} id
    * @param {number} expenseId
-   * @param {object} payload
+   * @param {object|FormData} payload
    */
-  updateExpense: (id, expenseId, payload) =>
-    api.patch(`/projects/${id}/expenses/${expenseId}`, payload).then((res) => res.data.data),
+  updateExpense: (id, expenseId, payload) => {
+    const isFormData = typeof FormData !== 'undefined' && payload instanceof FormData;
+    return api
+      .patch(`/projects/${id}/expenses/${expenseId}`, payload, {
+        headers: isFormData ? { 'Content-Type': 'multipart/form-data' } : undefined,
+      })
+      .then((res) => res.data.data);
+  },
+
+  /**
+   * Update expense approval status.
+   * @param {number} id
+   * @param {number} expenseId
+   * @param {{status: 'approved'|'rejected', rejection_reason?: string}} payload
+   */
+  updateExpenseStatus: (id, expenseId, payload) =>
+    api
+      .patch(`/projects/${id}/expenses/${expenseId}/status`, payload)
+      .then((res) => res.data.data),
 
   /**
    * Delete an expense entry.
@@ -147,6 +170,104 @@ export const projectApi = {
    */
   removeExpense: (id, expenseId) =>
     api.delete(`/projects/${id}/expenses/${expenseId}`).then((res) => res.data.data),
+
+  /**
+   * List risks and issues for a project.
+   * @param {number} id
+   * @param {object} [params]
+   */
+  risks: (id, params) =>
+    api.get(`/projects/${id}/risks`, { params }).then((res) => res.data.data),
+
+  /**
+   * Create a risk or issue for a project.
+   * @param {number} id
+   * @param {object} payload
+   */
+  createRisk: (id, payload) =>
+    api.post(`/projects/${id}/risks`, payload).then((res) => res.data.data),
+
+  /**
+   * Update a risk or issue.
+   * @param {number} id
+   * @param {number} riskId
+   * @param {object} payload
+   */
+  updateRisk: (id, riskId, payload) =>
+    api.patch(`/projects/${id}/risks/${riskId}`, payload).then((res) => res.data.data),
+
+  /**
+   * Delete a risk or issue.
+   * @param {number} id
+   * @param {number} riskId
+   */
+  removeRisk: (id, riskId) =>
+    api.delete(`/projects/${id}/risks/${riskId}`).then((res) => res.data.data),
+
+  /**
+   * List documents & wiki items for a project.
+   * @param {number} id
+   * @param {object} [params]
+   */
+  documents: (id, params) =>
+    api.get(`/projects/${id}/documents`, { params }).then((res) => res.data.data),
+
+  /**
+   * Get single document detail with version history.
+   * @param {number} id
+   * @param {number} docId
+   */
+  getDocument: (id, docId) =>
+    api.get(`/projects/${id}/documents/${docId}`).then((res) => res.data.data),
+
+  /**
+   * Create a document or wiki item for a project.
+   * @param {number} id
+   * @param {object|FormData} payload
+   */
+  createDocument: (id, payload) => {
+    const isFormData = typeof FormData !== 'undefined' && payload instanceof FormData;
+    return api
+      .post(`/projects/${id}/documents`, payload, {
+        headers: isFormData ? { 'Content-Type': 'multipart/form-data' } : undefined,
+      })
+      .then((res) => res.data.data);
+  },
+
+  /**
+   * Update a document (creates a new version if content/file changed).
+   * @param {number} id
+   * @param {number} docId
+   * @param {object|FormData} payload
+   */
+  updateDocument: (id, docId, payload) => {
+    const isFormData = typeof FormData !== 'undefined' && payload instanceof FormData;
+    return api
+      .patch(`/projects/${id}/documents/${docId}`, payload, {
+        headers: isFormData ? { 'Content-Type': 'multipart/form-data' } : undefined,
+      })
+      .then((res) => res.data.data);
+  },
+
+  /**
+   * Restore a document to a previous version snapshot.
+   * @param {number} id
+   * @param {number} docId
+   * @param {number} versionId
+   * @param {{change_note?: string}} [payload]
+   */
+  restoreDocumentVersion: (id, docId, versionId, payload = {}) =>
+    api
+      .post(`/projects/${id}/documents/${docId}/versions/${versionId}/restore`, payload)
+      .then((res) => res.data.data),
+
+  /**
+   * Delete a document and its version history.
+   * @param {number} id
+   * @param {number} docId
+   */
+  removeDocument: (id, docId) =>
+    api.delete(`/projects/${id}/documents/${docId}`).then((res) => res.data.data),
 
   /**
    * Lightweight counters for the topbar.

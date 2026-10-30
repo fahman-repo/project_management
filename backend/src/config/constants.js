@@ -51,6 +51,12 @@ const MILESTONE_STATUS = {
   missed: { label: 'Terlewat', color: '#ef4444' },
 };
 
+const EXPENSE_STATUS = {
+  pending: { label: 'Menunggu Persetujuan', color: '#f59e0b' },
+  approved: { label: 'Disetujui', color: '#10b981' },
+  rejected: { label: 'Ditolak', color: '#ef4444' },
+};
+
 const DEPENDENCY_TYPES = {
   blocked_by: 'Diblokir oleh',
   blocks: 'Memblokir',
@@ -77,6 +83,52 @@ const DEFAULT_PROJECT_COLORS = [
   '#14b8a6',
 ];
 
+const RISK_TYPES = {
+  risk: { label: 'Potensi Risiko', color: '#f59e0b' },
+  issue: { label: 'Masalah Aktual', color: '#ef4444' },
+};
+
+const RISK_CATEGORIES = {
+  technical: { label: 'Teknis & Arsitektur', color: '#6366f1' },
+  schedule: { label: 'Jadwal & Waktu', color: '#f59e0b' },
+  budget: { label: 'Anggaran & Biaya', color: '#10b981' },
+  resource: { label: 'SDM & Tim', color: '#ec4899' },
+  scope: { label: 'Ruang Lingkup (Scope)', color: '#8b5cf6' },
+  external: { label: 'Eksternal & Vendor', color: '#0ea5e9' },
+  other: { label: 'Lain-lain', color: '#64748b' },
+};
+
+const RISK_STATUS = {
+  identified: { label: 'Teridentifikasi', color: '#64748b' },
+  analyzing: { label: 'Dalam Analisis', color: '#8b5cf6' },
+  mitigating: { label: 'Dalam Mitigasi', color: '#3b82f6' },
+  monitoring: { label: 'Dipantau', color: '#f59e0b' },
+  resolved: { label: 'Teratasi', color: '#10b981' },
+  closed: { label: 'Ditutup', color: '#94a3b8' },
+};
+
+const RISK_SEVERITY = {
+  low: { label: 'Rendah', color: '#10b981', minScore: 1, maxScore: 4 },
+  medium: { label: 'Sedang', color: '#f59e0b', minScore: 5, maxScore: 9 },
+  high: { label: 'Tinggi', color: '#f97316', minScore: 10, maxScore: 15 },
+  critical: { label: 'Kritis', color: '#ef4444', minScore: 16, maxScore: 25 },
+};
+
+function computeRiskSeverity(probability, impact) {
+  const p = Math.max(1, Math.min(5, Number(probability) || 1));
+  const i = Math.max(1, Math.min(5, Number(impact) || 1));
+  const score = p * i;
+  let severity = 'low';
+  if (score >= 16) {
+    severity = 'critical';
+  } else if (score >= 10) {
+    severity = 'high';
+  } else if (score >= 5) {
+    severity = 'medium';
+  }
+  return { score, severity, probability: p, impact: i };
+}
+
 module.exports = {
   PROJECT_STATUS,
   TASK_STATUS,
@@ -85,7 +137,13 @@ module.exports = {
   ROLES,
   PROJECT_MEMBER_ROLES,
   MILESTONE_STATUS,
+  EXPENSE_STATUS,
   DEPENDENCY_TYPES,
   KANBAN_COLUMNS,
   DEFAULT_PROJECT_COLORS,
+  RISK_TYPES,
+  RISK_CATEGORIES,
+  RISK_STATUS,
+  RISK_SEVERITY,
+  computeRiskSeverity,
 };

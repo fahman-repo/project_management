@@ -46,6 +46,17 @@ function LegacyTaskRedirect() {
 }
 
 /**
+ * Redirects `/project/:id` or `/project/:id/:tab` (singular) to `/projects/...`
+ */
+function LegacyProjectRedirect() {
+  const { id, tab } = useParams();
+  const target = tab
+    ? `/projects/${encodeURIComponent(id)}?tab=${encodeURIComponent(tab)}`
+    : `/projects/${encodeURIComponent(id)}`;
+  return <Navigate to={target} replace />;
+}
+
+/**
  * Application root: restores the session and declares every route.
  */
 export default function App() {
@@ -90,6 +101,10 @@ export default function App() {
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/projects" element={<Projects />} />
           <Route path="/projects/:id" element={<ProjectDetail />} />
+          <Route path="/projects/:id/:tab" element={<ProjectDetail />} />
+          <Route path="/project" element={<Navigate to="/projects" replace />} />
+          <Route path="/project/:id" element={<LegacyProjectRedirect />} />
+          <Route path="/project/:id/:tab" element={<LegacyProjectRedirect />} />
           <Route path="/tasks" element={<Tasks />} />
           {/* Legacy deep link: task details live in a drawer, not a route. */}
           <Route path="/tasks/:id" element={<LegacyTaskRedirect />} />

@@ -184,6 +184,21 @@ const taskIdParams = z.object({ id: idParam });
 const taskCommentParams = z.object({ id: idParam, commentId: idParam });
 const taskAttachmentParams = z.object({ id: idParam, attachmentId: idParam });
 const taskDependencyParams = z.object({ id: idParam, dependencyId: idParam });
+const taskChecklistParams = z.object({ id: idParam, checklistId: idParam });
+
+/** POST /api/v1/tasks/:id/checklists */
+const createChecklistSchema = z.object({
+  title: requiredString(255),
+});
+
+/** PATCH /api/v1/tasks/:id/checklists/:checklistId */
+const updateChecklistSchema = z
+  .object({
+    title: requiredString(255).optional(),
+    is_checked: looseBoolean.optional(),
+    position: z.coerce.number().int().min(0).optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, 'Tidak ada perubahan yang dikirim');
 
 /** POST /api/v1/labels */
 const createLabelSchema = z.object({
@@ -215,6 +230,9 @@ module.exports = {
   taskCommentParams,
   taskAttachmentParams,
   taskDependencyParams,
+  taskChecklistParams,
+  createChecklistSchema,
+  updateChecklistSchema,
   createLabelSchema,
   updateLabelSchema,
   idParams,

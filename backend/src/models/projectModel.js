@@ -1,9 +1,9 @@
 'use strict';
 
-const { query, queryOne, execute } = require('../config/database');
+const { query, queryOne, execute, transaction } = require('../config/database');
 const { buildOrderBy, paginatedQuery } = require('./base');
 const dayjs = require('dayjs');
-const { DEFAULT_PROJECT_STATUSES } = require('../config/constants');
+const { DEFAULT_PROJECT_STATUSES, computeRiskSeverity } = require('../config/constants');
 
 const PROJECT_FIELDS = `p.id, p.code, p.name, p.description, p.status, p.priority, p.progress,
        p.color, p.budget, p.start_date, p.end_date, p.manager_id, p.created_by, p.template_id,
@@ -15,7 +15,7 @@ const PROJECT_ENRICHED_FIELDS = `${PROJECT_FIELDS},
        (SELECT COUNT(*) FROM tasks t_c WHERE t_c.project_id = p.id) AS task_count,
        (SELECT COUNT(*) FROM tasks t_d WHERE t_d.project_id = p.id AND t_d.status = 'done') AS completed_task_count,
        ((SELECT IFNULL(SUM(t_ac.actual_cost), 0) FROM tasks t_ac WHERE t_ac.project_id = p.id) +
-        (SELECT IFNULL(SUM(pe_dir.amount), 0) FROM project_expenses pe_dir WHERE pe_dir.project_id = p.id AND pe_dir.task_id IS NULL)) AS actual_cost,
+        (SELECT IFNULL(SUM(pe_dir.amount), 0) FROM project_expenses pe_dir WHERE pe_dir.project_id = p.id AND pe_dir.task_id IS NULL AND pe_dir.status = 'approved')) AS actual_cost,
        (SELECT IFNULL(SUM(t_ec.estimated_cost), 0) FROM tasks t_ec WHERE t_ec.project_id = p.id) AS total_estimated_cost`;
 
 /** Whitelist of sortable project columns - never interpolate user input. */
@@ -378,12 +378,18 @@ async function getProjectStats(projectId) {
        (SELECT COUNT(*) FROM tasks WHERE project_id = ? AND status = 'in_progress') AS in_progress_count,
        (SELECT COUNT(*) FROM project_members WHERE project_id = ?) AS member_count,
        (SELECT COUNT(*) FROM milestones WHERE project_id = ?) AS milestone_count,
+       (SELECT COUNT(*) FROM project_risks WHERE project_id = ?) AS risk_count,
+       (SELECT COUNT(*) FROM project_risks WHERE project_id = ? AND status NOT IN ('resolved', 'closed')) AS open_risk_count,
+       (SELECT COUNT(*) FROM project_risks WHERE project_id = ? AND status NOT IN ('resolved', 'closed') AND severity IN ('high', 'critical')) AS critical_risk_count,
+       (SELECT COUNT(*) FROM project_documents WHERE project_id = ?) AS document_count,
        (SELECT IFNULL(SUM(estimated_cost), 0) FROM tasks WHERE project_id = ?) AS total_task_estimated_cost,
        (SELECT IFNULL(SUM(actual_cost), 0) FROM tasks WHERE project_id = ?) AS total_task_actual_cost,
-       (SELECT IFNULL(SUM(amount), 0) FROM project_expenses WHERE project_id = ? AND task_id IS NULL) AS total_direct_expenses,
-       (SELECT IFNULL(SUM(amount), 0) FROM project_expenses WHERE project_id = ?) AS total_expenses,
+       (SELECT IFNULL(SUM(amount), 0) FROM project_expenses WHERE project_id = ? AND task_id IS NULL AND status = 'approved') AS total_direct_expenses,
+       (SELECT IFNULL(SUM(amount), 0) FROM project_expenses WHERE project_id = ? AND status = 'approved') AS total_expenses,
+       (SELECT IFNULL(SUM(amount), 0) FROM project_expenses WHERE project_id = ? AND status = 'pending') AS total_pending_expenses,
+       (SELECT COUNT(*) FROM project_expenses WHERE project_id = ? AND status = 'pending') AS pending_expense_count,
        (SELECT budget FROM projects WHERE id = ?) AS budget`,
-    [projectId, projectId, projectId, projectId, projectId, projectId, projectId, projectId, projectId, projectId, projectId]
+    new Array(17).fill(projectId)
   );
 
   const budget = Number(row.budget || 0);
@@ -391,6 +397,8 @@ async function getProjectStats(projectId) {
   const taskActCost = Number(row.total_task_actual_cost || 0);
   const directExpenses = Number(row.total_direct_expenses || 0);
   const totalExpenses = Number(row.total_expenses || 0);
+  const totalPendingExpenses = Number(row.total_pending_expenses || 0);
+  const pendingExpenseCount = Number(row.pending_expense_count || 0);
   const actualCost = taskActCost + directExpenses;
   const remainingBudget = budget > 0 ? (budget - actualCost) : 0;
   const budgetUsagePercent = budget > 0 ? Math.round((actualCost / budget) * 100 * 10) / 10 : 0;
@@ -402,11 +410,17 @@ async function getProjectStats(projectId) {
     in_progress_count: Number(row.in_progress_count),
     member_count: Number(row.member_count),
     milestone_count: Number(row.milestone_count),
+    risk_count: Number(row.risk_count || 0),
+    open_risk_count: Number(row.open_risk_count || 0),
+    critical_risk_count: Number(row.critical_risk_count || 0),
+    document_count: Number(row.document_count || 0),
     budget,
     total_estimated_cost: taskEstCost,
     total_task_actual_cost: taskActCost,
     total_direct_expenses: directExpenses,
     total_expenses: totalExpenses,
+    total_pending_expenses: totalPendingExpenses,
+    pending_expense_count: pendingExpenseCount,
     actual_cost: actualCost,
     remaining_budget: remainingBudget,
     budget_usage_percent: budgetUsagePercent,
@@ -892,13 +906,15 @@ async function deleteProjectStatus(projectId, statusId, transferToKey = null) {
 // ---------------------------------------------------------------------------
 
 /**
- * Normalise DECIMAL columns for project expenses.
+ * Normalise DECIMAL and receipt fields for project expenses.
  */
 function normalizeExpense(row) {
   if (!row) return null;
   return {
     ...row,
     amount: row.amount !== null && row.amount !== undefined ? Number(row.amount) : 0,
+    receipt_size: row.receipt_size !== null && row.receipt_size !== undefined ? Number(row.receipt_size) : null,
+    receipt_url: row.receipt_file ? `/uploads/${row.receipt_file}` : null,
   };
 }
 
@@ -906,13 +922,17 @@ function normalizeExpense(row) {
  * List expenses for a project with optional filters.
  */
 async function listProjectExpenses(projectId, filters = {}) {
-  const { category, search, taskId } = filters;
+  const { category, search, taskId, status } = filters;
   const conditions = ['pe.project_id = ?'];
   const params = [projectId];
 
   if (category) {
     conditions.push('pe.category = ?');
     params.push(category);
+  }
+  if (status) {
+    conditions.push('pe.status = ?');
+    params.push(status);
   }
   if (taskId !== undefined) {
     if (taskId === null || taskId === 'direct') {
@@ -929,12 +949,16 @@ async function listProjectExpenses(projectId, filters = {}) {
 
   const rows = await query(
     `SELECT pe.id, pe.project_id, pe.task_id, pe.title, pe.category, pe.amount,
-            pe.expense_date, pe.vendor_name, pe.receipt_note, pe.created_by,
+            pe.expense_date, pe.status, pe.vendor_name, pe.receipt_note,
+            pe.receipt_file, pe.receipt_original_name, pe.receipt_mime_type, pe.receipt_size,
+            pe.created_by, pe.approved_by, pe.approved_at, pe.rejection_reason,
             pe.created_at, pe.updated_at,
             u.name AS creator_name,
+            app_u.name AS approver_name,
             t.title AS task_title
        FROM project_expenses pe
        LEFT JOIN users u ON u.id = pe.created_by
+       LEFT JOIN users app_u ON app_u.id = pe.approved_by
        LEFT JOIN tasks t ON t.id = pe.task_id
       WHERE ${conditions.join(' AND ')}
       ORDER BY pe.expense_date DESC, pe.id DESC`,
@@ -949,12 +973,16 @@ async function listProjectExpenses(projectId, filters = {}) {
 async function findExpenseById(expenseId) {
   const row = await queryOne(
     `SELECT pe.id, pe.project_id, pe.task_id, pe.title, pe.category, pe.amount,
-            pe.expense_date, pe.vendor_name, pe.receipt_note, pe.created_by,
+            pe.expense_date, pe.status, pe.vendor_name, pe.receipt_note,
+            pe.receipt_file, pe.receipt_original_name, pe.receipt_mime_type, pe.receipt_size,
+            pe.created_by, pe.approved_by, pe.approved_at, pe.rejection_reason,
             pe.created_at, pe.updated_at,
             u.name AS creator_name,
+            app_u.name AS approver_name,
             t.title AS task_title
        FROM project_expenses pe
        LEFT JOIN users u ON u.id = pe.created_by
+       LEFT JOIN users app_u ON app_u.id = pe.approved_by
        LEFT JOIN tasks t ON t.id = pe.task_id
       WHERE pe.id = ? LIMIT 1`,
     [expenseId]
@@ -972,14 +1000,24 @@ async function createProjectExpense(projectId, data, userId) {
     category = 'other',
     amount = 0,
     expense_date,
+    status = 'pending',
     vendor_name = null,
     receipt_note = null,
+    receipt_file = null,
+    receipt_original_name = null,
+    receipt_mime_type = null,
+    receipt_size = null,
+    approved_by = null,
+    approved_at = null,
+    rejection_reason = null,
   } = data;
 
   const result = await execute(
     `INSERT INTO project_expenses
-       (project_id, task_id, title, category, amount, expense_date, vendor_name, receipt_note, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (project_id, task_id, title, category, amount, expense_date, status,
+        vendor_name, receipt_note, receipt_file, receipt_original_name, receipt_mime_type, receipt_size,
+        created_by, approved_by, approved_at, rejection_reason)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       projectId,
       task_id || null,
@@ -987,9 +1025,17 @@ async function createProjectExpense(projectId, data, userId) {
       category,
       amount,
       expense_date,
+      status,
       vendor_name || null,
       receipt_note || null,
+      receipt_file || null,
+      receipt_original_name || null,
+      receipt_mime_type || null,
+      receipt_size || null,
       userId,
+      approved_by || null,
+      approved_at || null,
+      rejection_reason || null,
     ]
   );
 
@@ -1003,7 +1049,23 @@ async function updateProjectExpense(projectId, expenseId, data) {
   const fields = [];
   const params = [];
 
-  const ALLOWED = ['task_id', 'title', 'category', 'amount', 'expense_date', 'vendor_name', 'receipt_note'];
+  const ALLOWED = [
+    'task_id',
+    'title',
+    'category',
+    'amount',
+    'expense_date',
+    'status',
+    'vendor_name',
+    'receipt_note',
+    'receipt_file',
+    'receipt_original_name',
+    'receipt_mime_type',
+    'receipt_size',
+    'approved_by',
+    'approved_at',
+    'rejection_reason',
+  ];
   for (const col of ALLOWED) {
     if (data[col] !== undefined) {
       fields.push(`${col} = ?`);
@@ -1022,6 +1084,19 @@ async function updateProjectExpense(projectId, expenseId, data) {
 }
 
 /**
+ * Concurrency-safe status update for an expense from pending status.
+ */
+async function updateExpenseStatus(expenseId, { status, approved_by = null, approved_at = null, rejection_reason = null }) {
+  const result = await execute(
+    `UPDATE project_expenses
+        SET status = ?, approved_by = ?, approved_at = ?, rejection_reason = ?
+      WHERE id = ? AND status = 'pending'`,
+    [status, approved_by, approved_at, rejection_reason, expenseId]
+  );
+  return result.affectedRows;
+}
+
+/**
  * Delete an expense.
  */
 async function deleteProjectExpense(projectId, expenseId) {
@@ -1033,13 +1108,13 @@ async function deleteProjectExpense(projectId, expenseId) {
 }
 
 /**
- * Expense summary grouped by category.
+ * Expense summary grouped by category (approved only).
  */
 async function getExpenseSummaryByCategory(projectId) {
   const rows = await query(
     `SELECT category, COUNT(*) AS count, IFNULL(SUM(amount), 0) AS total_amount
        FROM project_expenses
-      WHERE project_id = ?
+      WHERE project_id = ? AND status = 'approved'
       GROUP BY category
       ORDER BY total_amount DESC`,
     [projectId]
@@ -1049,6 +1124,907 @@ async function getExpenseSummaryByCategory(projectId) {
     count: Number(r.count),
     total_amount: Number(r.total_amount),
   }));
+}
+
+/**
+ * Retrieve unique user IDs that can approve project expenses (project manager, owner/manager members, system admins).
+ */
+async function listProjectApproverIds(projectId) {
+  const rows = await query(
+    `SELECT DISTINCT user_id FROM (
+       SELECT manager_id AS user_id FROM projects WHERE id = ? AND manager_id IS NOT NULL
+       UNION
+       SELECT user_id FROM project_members WHERE project_id = ? AND role IN ('owner', 'manager')
+       UNION
+       SELECT id AS user_id FROM users WHERE role = 'admin' AND is_active = 1
+     ) approvers`,
+    [projectId, projectId]
+  );
+  return rows.map((r) => r.user_id).filter(Boolean);
+}
+
+// ---------------------------------------------------------------------------
+// Project Risks & Issues
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate unique risk code per project e.g. RSK-001 or ISS-001
+ */
+async function generateRiskCode(projectId, type = 'risk') {
+  const prefix = type === 'issue' ? 'ISS' : 'RSK';
+  const row = await queryOne(
+    'SELECT COUNT(*) AS total FROM project_risks WHERE project_id = ? AND type = ?',
+    [projectId, type]
+  );
+  let seq = Number(row?.total || 0) + 1;
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const code = `${prefix}-${String(seq).padStart(3, '0')}`;
+    const existing = await queryOne(
+      'SELECT id FROM project_risks WHERE project_id = ? AND code = ? LIMIT 1',
+      [projectId, code]
+    );
+    if (!existing) return code;
+    seq += 1;
+  }
+  return `${prefix}-${Date.now().toString().slice(-4)}`;
+}
+
+/**
+ * Normalise risk row types.
+ */
+function normalizeRisk(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    probability: Number(row.probability),
+    impact: Number(row.impact),
+    risk_score: Number(row.risk_score),
+  };
+}
+
+/**
+ * List risks for a project with filters.
+ */
+async function listProjectRisks(projectId, filters = {}) {
+  const { type, category, severity, status, ownerId, probability, impact, search } = filters;
+  const conditions = ['pr.project_id = ?'];
+  const params = [projectId];
+
+  if (type) {
+    conditions.push('pr.type = ?');
+    params.push(type);
+  }
+  if (category) {
+    conditions.push('pr.category = ?');
+    params.push(category);
+  }
+  if (severity) {
+    conditions.push('pr.severity = ?');
+    params.push(severity);
+  }
+  if (status) {
+    conditions.push('pr.status = ?');
+    params.push(status);
+  }
+  if (ownerId !== undefined) {
+    if (ownerId === null || ownerId === 'unassigned') {
+      conditions.push('pr.owner_id IS NULL');
+    } else {
+      conditions.push('pr.owner_id = ?');
+      params.push(ownerId);
+    }
+  }
+  if (probability) {
+    conditions.push('pr.probability = ?');
+    params.push(Number(probability));
+  }
+  if (impact) {
+    conditions.push('pr.impact = ?');
+    params.push(Number(impact));
+  }
+  if (search) {
+    conditions.push('(pr.title LIKE ? OR pr.code LIKE ? OR pr.description LIKE ? OR pr.mitigation_plan LIKE ?)');
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+  }
+
+  const rows = await query(
+    `SELECT pr.id, pr.project_id, pr.code, pr.type, pr.title, pr.description,
+            pr.category, pr.probability, pr.impact, pr.risk_score, pr.severity,
+            pr.mitigation_plan, pr.contingency_plan, pr.status,
+            pr.owner_id, pr.linked_task_id, pr.target_date, pr.resolved_at,
+            pr.created_by, pr.created_at, pr.updated_at,
+            u_owner.name AS owner_name, u_owner.avatar AS owner_avatar, u_owner.job_title AS owner_job_title,
+            u_creator.name AS creator_name,
+            t.title AS linked_task_title
+       FROM project_risks pr
+       LEFT JOIN users u_owner ON u_owner.id = pr.owner_id
+       LEFT JOIN users u_creator ON u_creator.id = pr.created_by
+       LEFT JOIN tasks t ON t.id = pr.linked_task_id
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY
+        CASE WHEN pr.status IN ('resolved', 'closed') THEN 1 ELSE 0 END ASC,
+        pr.risk_score DESC,
+        pr.id DESC`,
+    params
+  );
+  return rows.map(normalizeRisk);
+}
+
+/**
+ * Summary KPI and 5x5 Matrix data for project risks.
+ */
+async function getProjectRiskSummary(projectId) {
+  const rows = await query(
+    `SELECT id, code, title, type, category, probability, impact, risk_score, severity, status, owner_id
+       FROM project_risks
+      WHERE project_id = ?`,
+    [projectId]
+  );
+
+  let totalCount = rows.length;
+  let openCount = 0;
+  let resolvedCount = 0;
+  let criticalHighOpenCount = 0;
+  let riskCount = 0;
+  let issueCount = 0;
+
+  const bySeverity = { low: 0, medium: 0, high: 0, critical: 0 };
+  const byStatus = {
+    identified: 0,
+    analyzing: 0,
+    mitigating: 0,
+    monitoring: 0,
+    resolved: 0,
+    closed: 0,
+  };
+  const categoryCounts = {};
+
+  // 5x5 Matrix (P: 1..5, I: 1..5)
+  const matrix = [];
+  for (let p = 1; p <= 5; p += 1) {
+    for (let i = 1; i <= 5; i += 1) {
+      const { score, severity } = computeRiskSeverity(p, i);
+      matrix.push({
+        probability: p,
+        impact: i,
+        risk_score: score,
+        severity,
+        count: 0,
+        open_count: 0,
+        items: [],
+      });
+    }
+  }
+
+  const matrixMap = new Map();
+  matrix.forEach((cell) => {
+    matrixMap.set(`${cell.probability}-${cell.impact}`, cell);
+  });
+
+  for (const r of rows) {
+    const isResolved = r.status === 'resolved' || r.status === 'closed';
+    if (isResolved) {
+      resolvedCount += 1;
+    } else {
+      openCount += 1;
+      if (r.severity === 'critical' || r.severity === 'high') {
+        criticalHighOpenCount += 1;
+      }
+    }
+
+    if (r.type === 'issue') {
+      issueCount += 1;
+    } else {
+      riskCount += 1;
+    }
+
+    if (bySeverity[r.severity] !== undefined) {
+      bySeverity[r.severity] += 1;
+    }
+    if (byStatus[r.status] !== undefined) {
+      byStatus[r.status] += 1;
+    }
+
+    categoryCounts[r.category] = (categoryCounts[r.category] || 0) + 1;
+
+    const cell = matrixMap.get(`${r.probability}-${r.impact}`);
+    if (cell) {
+      cell.count += 1;
+      if (!isResolved) {
+        cell.open_count += 1;
+      }
+      cell.items.push({
+        id: r.id,
+        code: r.code,
+        title: r.title,
+        type: r.type,
+        severity: r.severity,
+        status: r.status,
+      });
+    }
+  }
+
+  const byCategory = Object.entries(categoryCounts).map(([category, count]) => ({
+    category,
+    count,
+  }));
+
+  return {
+    total_count: totalCount,
+    open_count: openCount,
+    resolved_count: resolvedCount,
+    critical_high_open_count: criticalHighOpenCount,
+    risk_count: riskCount,
+    issue_count: issueCount,
+    by_severity: bySeverity,
+    by_status: byStatus,
+    by_category: byCategory,
+    matrix,
+  };
+}
+
+/**
+ * Find single risk by id.
+ */
+async function findRiskById(riskId) {
+  const row = await queryOne(
+    `SELECT pr.id, pr.project_id, pr.code, pr.type, pr.title, pr.description,
+            pr.category, pr.probability, pr.impact, pr.risk_score, pr.severity,
+            pr.mitigation_plan, pr.contingency_plan, pr.status,
+            pr.owner_id, pr.linked_task_id, pr.target_date, pr.resolved_at,
+            pr.created_by, pr.created_at, pr.updated_at,
+            u_owner.name AS owner_name, u_owner.avatar AS owner_avatar, u_owner.job_title AS owner_job_title,
+            u_creator.name AS creator_name,
+            t.title AS linked_task_title
+       FROM project_risks pr
+       LEFT JOIN users u_owner ON u_owner.id = pr.owner_id
+       LEFT JOIN users u_creator ON u_creator.id = pr.created_by
+       LEFT JOIN tasks t ON t.id = pr.linked_task_id
+      WHERE pr.id = ? LIMIT 1`,
+    [riskId]
+  );
+  return normalizeRisk(row);
+}
+
+/**
+ * Create a new risk or issue.
+ */
+async function createProjectRisk(projectId, data, userId) {
+  const {
+    type = 'risk',
+    title,
+    description = null,
+    category = 'technical',
+    probability = 3,
+    impact = 3,
+    mitigation_plan = null,
+    contingency_plan = null,
+    status = 'identified',
+    owner_id = null,
+    linked_task_id = null,
+    target_date = null,
+  } = data;
+
+  const code = await generateRiskCode(projectId, type);
+  const { score, severity, probability: p, impact: i } = computeRiskSeverity(probability, impact);
+  const isResolved = status === 'resolved' || status === 'closed';
+  const resolvedAt = isResolved ? dayjs().format('YYYY-MM-DD HH:mm:ss') : null;
+
+  const result = await execute(
+    `INSERT INTO project_risks
+       (project_id, code, type, title, description, category, probability, impact,
+        risk_score, severity, mitigation_plan, contingency_plan, status, owner_id,
+        linked_task_id, target_date, resolved_at, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      projectId,
+      code,
+      type,
+      title,
+      description || null,
+      category,
+      p,
+      i,
+      score,
+      severity,
+      mitigation_plan || null,
+      contingency_plan || null,
+      status,
+      owner_id || null,
+      linked_task_id || null,
+      target_date || null,
+      resolvedAt,
+      userId,
+    ]
+  );
+
+  return result.insertId;
+}
+
+/**
+ * Update an existing risk or issue.
+ */
+async function updateProjectRisk(projectId, riskId, data) {
+  const existing = await findRiskById(riskId);
+  if (!existing) return 0;
+
+  const fields = [];
+  const params = [];
+
+  const p = data.probability !== undefined ? Number(data.probability) : existing.probability;
+  const i = data.impact !== undefined ? Number(data.impact) : existing.impact;
+  const { score, severity } = computeRiskSeverity(p, i);
+
+  if (data.probability !== undefined) {
+    fields.push('probability = ?');
+    params.push(p);
+  }
+  if (data.impact !== undefined) {
+    fields.push('impact = ?');
+    params.push(i);
+  }
+  if (data.probability !== undefined || data.impact !== undefined) {
+    fields.push('risk_score = ?', 'severity = ?');
+    params.push(score, severity);
+  }
+
+  const simpleFields = [
+    'type',
+    'title',
+    'description',
+    'category',
+    'mitigation_plan',
+    'contingency_plan',
+    'owner_id',
+    'linked_task_id',
+    'target_date',
+  ];
+
+  for (const key of simpleFields) {
+    if (data[key] !== undefined) {
+      fields.push(`${key} = ?`);
+      params.push(data[key] === '' ? null : data[key]);
+    }
+  }
+
+  if (data.status !== undefined) {
+    fields.push('status = ?');
+    params.push(data.status);
+
+    const wasResolved = existing.status === 'resolved' || existing.status === 'closed';
+    const isResolved = data.status === 'resolved' || data.status === 'closed';
+    if (isResolved && !wasResolved) {
+      fields.push('resolved_at = ?');
+      params.push(dayjs().format('YYYY-MM-DD HH:mm:ss'));
+    } else if (!isResolved && wasResolved) {
+      fields.push('resolved_at = NULL');
+    }
+  }
+
+  if (!fields.length) return 0;
+
+  params.push(projectId, riskId);
+  const result = await execute(
+    `UPDATE project_risks SET ${fields.join(', ')} WHERE project_id = ? AND id = ?`,
+    params
+  );
+  return result.affectedRows;
+}
+
+/**
+ * Delete a risk.
+ */
+async function deleteProjectRisk(projectId, riskId) {
+  const result = await execute(
+    'DELETE FROM project_risks WHERE project_id = ? AND id = ?',
+    [projectId, riskId]
+  );
+  return result.affectedRows > 0;
+}
+
+// ---------------------------------------------------------------------------
+// project_documents & project_document_versions
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate a unique document code per project (DOC-001, DOC-002, etc.)
+ * @param {number} projectId
+ */
+async function generateDocumentCode(projectId) {
+  const row = await queryOne(
+    'SELECT COUNT(*) AS total FROM project_documents WHERE project_id = ?',
+    [projectId]
+  );
+  let seq = Number(row?.total || 0) + 1;
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const code = `DOC-${String(seq).padStart(3, '0')}`;
+    const existing = await queryOne(
+      'SELECT id FROM project_documents WHERE project_id = ? AND code = ? LIMIT 1',
+      [projectId, code]
+    );
+    if (!existing) return code;
+    seq += 1;
+  }
+  return `DOC-${Date.now().toString().slice(-4)}`;
+}
+
+/**
+ * List project documents with optional filters.
+ * @param {number} projectId
+ * @param {object} filters
+ */
+async function listProjectDocuments(projectId, filters = {}) {
+  const { category, status, search, pinned } = filters;
+  const conditions = ['pd.project_id = ?'];
+  const params = [projectId];
+
+  if (category) {
+    conditions.push('pd.category = ?');
+    params.push(category);
+  }
+  if (status) {
+    conditions.push('pd.status = ?');
+    params.push(status);
+  }
+  if (pinned !== undefined && pinned !== '') {
+    const isPinned = pinned === true || pinned === 'true' || pinned === '1' || pinned === 1;
+    conditions.push('pd.is_pinned = ?');
+    params.push(isPinned ? 1 : 0);
+  }
+  if (search) {
+    conditions.push('(pd.title LIKE ? OR pd.code LIKE ? OR pd.summary LIKE ? OR pd.content LIKE ? OR pd.file_original_name LIKE ?)');
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+  }
+
+  const rows = await query(
+    `SELECT pd.id, pd.project_id, pd.code, pd.title, pd.category, pd.status,
+            pd.summary, pd.file_name, pd.file_original_name, pd.file_mime_type, pd.file_size,
+            pd.current_version, pd.is_pinned, pd.is_locked,
+            pd.created_by, pd.updated_by, pd.created_at, pd.updated_at,
+            u_creator.name AS creator_name, u_creator.avatar AS creator_avatar,
+            u_updater.name AS updater_name, u_updater.avatar AS updater_avatar,
+            (SELECT COUNT(*) FROM project_document_versions pdv WHERE pdv.document_id = pd.id) AS version_count
+       FROM project_documents pd
+       LEFT JOIN users u_creator ON u_creator.id = pd.created_by
+       LEFT JOIN users u_updater ON u_updater.id = pd.updated_by
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY pd.is_pinned DESC, pd.updated_at DESC, pd.id DESC`,
+    params
+  );
+
+  return rows.map((r) => ({
+    ...r,
+    current_version: Number(r.current_version),
+    version_count: Number(r.version_count || 1),
+    is_pinned: Boolean(r.is_pinned),
+    is_locked: Boolean(r.is_locked),
+    file_size: r.file_size ? Number(r.file_size) : null,
+  }));
+}
+
+/**
+ * Summary KPI counts for documents in a project.
+ * @param {number} projectId
+ */
+async function getProjectDocumentSummary(projectId) {
+  const rows = await query(
+    `SELECT id, category, status, is_pinned, is_locked, file_name, current_version
+       FROM project_documents
+      WHERE project_id = ?`,
+    [projectId]
+  );
+
+  const totalCount = rows.length;
+  let pinnedCount = 0;
+  let lockedCount = 0;
+  let withFileCount = 0;
+  let totalVersionsCount = 0;
+
+  const byCategory = {
+    charter: 0,
+    contract: 0,
+    mom: 0,
+    sop: 0,
+    technical: 0,
+    wiki: 0,
+    other: 0,
+  };
+
+  const byStatus = {
+    draft: 0,
+    review: 0,
+    published: 0,
+    final: 0,
+    archived: 0,
+  };
+
+  for (const r of rows) {
+    if (r.is_pinned) pinnedCount += 1;
+    if (r.is_locked || r.status === 'final') lockedCount += 1;
+    if (r.file_name) withFileCount += 1;
+    totalVersionsCount += Number(r.current_version || 1);
+
+    if (byCategory[r.category] !== undefined) {
+      byCategory[r.category] += 1;
+    }
+    if (byStatus[r.status] !== undefined) {
+      byStatus[r.status] += 1;
+    }
+  }
+
+  return {
+    total_count: totalCount,
+    pinned_count: pinnedCount,
+    locked_count: lockedCount,
+    with_file_count: withFileCount,
+    total_versions_count: totalVersionsCount,
+    by_category: byCategory,
+    by_status: byStatus,
+  };
+}
+
+/**
+ * Get single document by id with full details.
+ * @param {number} documentId
+ */
+async function findDocumentById(documentId) {
+  const row = await queryOne(
+    `SELECT pd.id, pd.project_id, pd.code, pd.title, pd.category, pd.status,
+            pd.summary, pd.content, pd.file_name, pd.file_original_name, pd.file_mime_type, pd.file_size,
+            pd.current_version, pd.is_pinned, pd.is_locked,
+            pd.created_by, pd.updated_by, pd.created_at, pd.updated_at,
+            u_creator.name AS creator_name, u_creator.avatar AS creator_avatar,
+            u_updater.name AS updater_name, u_updater.avatar AS updater_avatar,
+            (SELECT COUNT(*) FROM project_document_versions pdv WHERE pdv.document_id = pd.id) AS version_count
+       FROM project_documents pd
+       LEFT JOIN users u_creator ON u_creator.id = pd.created_by
+       LEFT JOIN users u_updater ON u_updater.id = pd.updated_by
+      WHERE pd.id = ? LIMIT 1`,
+    [documentId]
+  );
+
+  if (!row) return null;
+
+  return {
+    ...row,
+    current_version: Number(row.current_version),
+    version_count: Number(row.version_count || 1),
+    is_pinned: Boolean(row.is_pinned),
+    is_locked: Boolean(row.is_locked),
+    file_size: row.file_size ? Number(row.file_size) : null,
+  };
+}
+
+/**
+ * List all versions of a document.
+ * @param {number} documentId
+ */
+async function listDocumentVersions(documentId) {
+  const rows = await query(
+    `SELECT pdv.id, pdv.document_id, pdv.project_id, pdv.version_number,
+            pdv.title, pdv.content, pdv.file_name, pdv.file_original_name,
+            pdv.file_mime_type, pdv.file_size, pdv.change_note,
+            pdv.created_by, pdv.created_at,
+            u.name AS created_by_name, u.avatar AS created_by_avatar, u.job_title AS created_by_job_title
+       FROM project_document_versions pdv
+       LEFT JOIN users u ON u.id = pdv.created_by
+      WHERE pdv.document_id = ?
+      ORDER BY pdv.version_number DESC, pdv.id DESC`,
+    [documentId]
+  );
+
+  return rows.map((r) => ({
+    ...r,
+    version_number: Number(r.version_number),
+    file_size: r.file_size ? Number(r.file_size) : null,
+  }));
+}
+
+/**
+ * Find single document version.
+ * @param {number} documentId
+ * @param {number} versionId
+ */
+async function findDocumentVersionById(documentId, versionId) {
+  const row = await queryOne(
+    `SELECT pdv.id, pdv.document_id, pdv.project_id, pdv.version_number,
+            pdv.title, pdv.content, pdv.file_name, pdv.file_original_name,
+            pdv.file_mime_type, pdv.file_size, pdv.change_note,
+            pdv.created_by, pdv.created_at,
+            u.name AS created_by_name, u.avatar AS created_by_avatar, u.job_title AS created_by_job_title
+       FROM project_document_versions pdv
+       LEFT JOIN users u ON u.id = pdv.created_by
+      WHERE pdv.document_id = ? AND pdv.id = ? LIMIT 1`,
+    [documentId, versionId]
+  );
+
+  if (!row) return null;
+
+  return {
+    ...row,
+    version_number: Number(row.version_number),
+    file_size: row.file_size ? Number(row.file_size) : null,
+  };
+}
+
+/**
+ * Create a document and write the initial version snapshot.
+ * @param {number} projectId
+ * @param {object} data
+ * @param {number} userId
+ */
+async function createProjectDocument(projectId, data, userId) {
+  const {
+    title,
+    category = 'wiki',
+    status = 'published',
+    summary = null,
+    content = null,
+    file_name = null,
+    file_original_name = null,
+    file_mime_type = null,
+    file_size = null,
+    is_pinned = false,
+    is_locked = false,
+    change_note = 'Versi awal dokumen',
+  } = data;
+
+  const code = await generateDocumentCode(projectId);
+
+  let docId;
+  await transaction(async (connection) => {
+    const [docResult] = await connection.execute(
+      `INSERT INTO project_documents
+         (project_id, code, title, category, status, summary, content,
+          file_name, file_original_name, file_mime_type, file_size,
+          current_version, is_pinned, is_locked, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+      [
+        projectId,
+        code,
+        title,
+        category,
+        status,
+        summary || null,
+        content || null,
+        file_name || null,
+        file_original_name || null,
+        file_mime_type || null,
+        file_size || null,
+        is_pinned ? 1 : 0,
+        is_locked ? 1 : 0,
+        userId,
+        userId,
+      ]
+    );
+
+    docId = docResult.insertId;
+
+    await connection.execute(
+      `INSERT INTO project_document_versions
+         (document_id, project_id, version_number, title, content,
+          file_name, file_original_name, file_mime_type, file_size,
+          change_note, created_by)
+       VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        docId,
+        projectId,
+        title,
+        content || null,
+        file_name || null,
+        file_original_name || null,
+        file_mime_type || null,
+        file_size || null,
+        change_note || 'Versi awal dokumen',
+        userId,
+      ]
+    );
+  });
+
+  return docId;
+}
+
+/**
+ * Update an existing document. If content/file changed, snapshot a new version.
+ * @param {number} projectId
+ * @param {number} documentId
+ * @param {object} data
+ * @param {number} userId
+ */
+async function updateProjectDocument(projectId, documentId, data, userId) {
+  const existing = await findDocumentById(documentId);
+  if (!existing) return 0;
+
+  const newTitle = data.title !== undefined ? data.title : existing.title;
+  const newContent = data.content !== undefined ? data.content : existing.content;
+  const hasNewFile = Boolean(data.file_name);
+  const removeFile = Boolean(data.remove_file);
+
+  let newFileName = existing.file_name;
+  let newFileOriginalName = existing.file_original_name;
+  let newFileMimeType = existing.file_mime_type;
+  let newFileSize = existing.file_size;
+
+  if (hasNewFile) {
+    newFileName = data.file_name;
+    newFileOriginalName = data.file_original_name;
+    newFileMimeType = data.file_mime_type;
+    newFileSize = data.file_size;
+  } else if (removeFile) {
+    newFileName = null;
+    newFileOriginalName = null;
+    newFileMimeType = null;
+    newFileSize = null;
+  }
+
+  // Check if this update warrants a new version snapshot
+  const titleChanged = data.title !== undefined && data.title !== existing.title;
+  const contentChanged = data.content !== undefined && data.content !== existing.content;
+  const fileChanged = hasNewFile || removeFile;
+  const forceVersion = Boolean(data.create_new_version);
+
+  const shouldCreateVersion = titleChanged || contentChanged || fileChanged || forceVersion;
+  const nextVersion = shouldCreateVersion ? existing.current_version + 1 : existing.current_version;
+
+  await transaction(async (connection) => {
+    const fields = [
+      'title = ?',
+      'content = ?',
+      'file_name = ?',
+      'file_original_name = ?',
+      'file_mime_type = ?',
+      'file_size = ?',
+      'current_version = ?',
+      'updated_by = ?',
+    ];
+    const params = [
+      newTitle,
+      newContent,
+      newFileName,
+      newFileOriginalName,
+      newFileMimeType,
+      newFileSize,
+      nextVersion,
+      userId,
+    ];
+
+    if (data.category !== undefined) {
+      fields.push('category = ?');
+      params.push(data.category);
+    }
+    if (data.status !== undefined) {
+      fields.push('status = ?');
+      params.push(data.status);
+    }
+    if (data.summary !== undefined) {
+      fields.push('summary = ?');
+      params.push(data.summary || null);
+    }
+    if (data.is_pinned !== undefined) {
+      fields.push('is_pinned = ?');
+      params.push(data.is_pinned ? 1 : 0);
+    }
+    if (data.is_locked !== undefined) {
+      fields.push('is_locked = ?');
+      params.push(data.is_locked ? 1 : 0);
+    }
+
+    params.push(projectId, documentId);
+
+    await connection.execute(
+      `UPDATE project_documents SET ${fields.join(', ')} WHERE project_id = ? AND id = ?`,
+      params
+    );
+
+    if (shouldCreateVersion) {
+      await connection.execute(
+        `INSERT INTO project_document_versions
+           (document_id, project_id, version_number, title, content,
+            file_name, file_original_name, file_mime_type, file_size,
+            change_note, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          documentId,
+          projectId,
+          nextVersion,
+          newTitle,
+          newContent,
+          newFileName,
+          newFileOriginalName,
+          newFileMimeType,
+          newFileSize,
+          data.change_note || `Pembaruan ke versi ${nextVersion}`,
+          userId,
+        ]
+      );
+    }
+  });
+
+  return nextVersion;
+}
+
+/**
+ * Restore a document to a previous version snapshot, writing a new version row.
+ * @param {number} projectId
+ * @param {number} documentId
+ * @param {object} targetVersion
+ * @param {string} changeNote
+ * @param {number} userId
+ */
+async function restoreDocumentVersion(projectId, documentId, targetVersion, changeNote, userId) {
+  const existing = await findDocumentById(documentId);
+  if (!existing) return 0;
+
+  const nextVersion = existing.current_version + 1;
+  const note = changeNote || `Dipulihkan dari versi v${targetVersion.version_number}`;
+
+  await transaction(async (connection) => {
+    await connection.execute(
+      `UPDATE project_documents
+          SET title = ?, content = ?, file_name = ?, file_original_name = ?,
+              file_mime_type = ?, file_size = ?, current_version = ?, updated_by = ?
+        WHERE project_id = ? AND id = ?`,
+      [
+        targetVersion.title,
+        targetVersion.content,
+        targetVersion.file_name,
+        targetVersion.file_original_name,
+        targetVersion.file_mime_type,
+        targetVersion.file_size,
+        nextVersion,
+        userId,
+        projectId,
+        documentId,
+      ]
+    );
+
+    await connection.execute(
+      `INSERT INTO project_document_versions
+         (document_id, project_id, version_number, title, content,
+          file_name, file_original_name, file_mime_type, file_size,
+          change_note, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        documentId,
+        projectId,
+        nextVersion,
+        targetVersion.title,
+        targetVersion.content,
+        targetVersion.file_name,
+        targetVersion.file_original_name,
+        targetVersion.file_mime_type,
+        targetVersion.file_size,
+        note,
+        userId,
+      ]
+    );
+  });
+
+  return nextVersion;
+}
+
+/**
+ * Delete a document and return all physical files to clean up from disk.
+ * @param {number} projectId
+ * @param {number} documentId
+ */
+async function deleteProjectDocument(projectId, documentId) {
+  const rows = await query(
+    `SELECT DISTINCT file_name FROM (
+       SELECT file_name FROM project_documents WHERE project_id = ? AND id = ? AND file_name IS NOT NULL
+       UNION
+       SELECT file_name FROM project_document_versions WHERE project_id = ? AND document_id = ? AND file_name IS NOT NULL
+     ) AS t`,
+    [projectId, documentId, projectId, documentId]
+  );
+  const fileNames = rows.map((r) => r.file_name).filter(Boolean);
+
+  const result = await execute(
+    'DELETE FROM project_documents WHERE project_id = ? AND id = ?',
+    [projectId, documentId]
+  );
+
+  return { affected: result.affectedRows > 0, fileNames };
 }
 
 module.exports = {
@@ -1089,6 +2065,25 @@ module.exports = {
   findExpenseById,
   createProjectExpense,
   updateProjectExpense,
+  updateExpenseStatus,
+  listProjectApproverIds,
   deleteProjectExpense,
   getExpenseSummaryByCategory,
+  generateRiskCode,
+  listProjectRisks,
+  getProjectRiskSummary,
+  findRiskById,
+  createProjectRisk,
+  updateProjectRisk,
+  deleteProjectRisk,
+  generateDocumentCode,
+  listProjectDocuments,
+  getProjectDocumentSummary,
+  findDocumentById,
+  listDocumentVersions,
+  findDocumentVersionById,
+  createProjectDocument,
+  updateProjectDocument,
+  restoreDocumentVersion,
+  deleteProjectDocument,
 };

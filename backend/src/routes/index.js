@@ -36,5 +36,6 @@ router.use('/reports', require('./report.routes'));
 router.use('/calendar', require('./calendar.routes'));
 router.use('/notifications', require('./notification.routes'));
 router.use('/activities', require('./activity.routes'));
+router.use('/search', require('./search.routes'));
 
 module.exports = router;

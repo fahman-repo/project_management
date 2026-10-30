@@ -20,6 +20,11 @@ const FRESH = process.argv.includes('--fresh');
 const SCHEMA_PATH = path.join(__dirname, 'schema.sql');
 
 const TABLES = [
+  'project_document_versions',
+  'project_documents',
+  'reminder_logs',
+  'task_checklists',
+  'project_risks',
   'task_attachments',
   'project_expenses',
   'task_comments',
@@ -157,6 +162,95 @@ try {
     }
   } catch (err) {
     console.warn('[migrate] Note on project_template_tasks.estimated_cost:', err.message);
+  }
+
+  // project_expenses: receipt upload + approval workflow columns.
+  // The status backfill runs only on the first application (when the column is
+  // missing) so legacy totals are preserved and re-runs stay idempotent.
+  try {
+    const [expenseCols] = await connection.query(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'project_expenses'`,
+      [env.DB_NAME]
+    );
+    const expenseColumnNames = expenseCols.map((c) => c.COLUMN_NAME);
+
+    if (!expenseColumnNames.includes('status')) {
+      await connection.query(
+        `ALTER TABLE project_expenses ADD COLUMN status ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending' AFTER expense_date`
+      );
+      await connection.query(`UPDATE project_expenses SET status = 'approved'`);
+      console.log('[migrate] Added project_expenses.status and backfilled legacy rows to approved.');
+    }
+    if (!expenseColumnNames.includes('receipt_file')) {
+      await connection.query(`ALTER TABLE project_expenses ADD COLUMN receipt_file VARCHAR(255) NULL AFTER receipt_note`);
+      console.log('[migrate] Added project_expenses.receipt_file column.');
+    }
+    if (!expenseColumnNames.includes('receipt_original_name')) {
+      await connection.query(`ALTER TABLE project_expenses ADD COLUMN receipt_original_name VARCHAR(255) NULL AFTER receipt_file`);
+      console.log('[migrate] Added project_expenses.receipt_original_name column.');
+    }
+    if (!expenseColumnNames.includes('receipt_mime_type')) {
+      await connection.query(`ALTER TABLE project_expenses ADD COLUMN receipt_mime_type VARCHAR(120) NULL AFTER receipt_original_name`);
+      console.log('[migrate] Added project_expenses.receipt_mime_type column.');
+    }
+    if (!expenseColumnNames.includes('receipt_size')) {
+      await connection.query(`ALTER TABLE project_expenses ADD COLUMN receipt_size INT UNSIGNED NULL AFTER receipt_mime_type`);
+      console.log('[migrate] Added project_expenses.receipt_size column.');
+    }
+    if (!expenseColumnNames.includes('approved_by')) {
+      await connection.query(`ALTER TABLE project_expenses ADD COLUMN approved_by INT UNSIGNED NULL AFTER created_by`);
+      console.log('[migrate] Added project_expenses.approved_by column.');
+    }
+    if (!expenseColumnNames.includes('approved_at')) {
+      await connection.query(`ALTER TABLE project_expenses ADD COLUMN approved_at DATETIME NULL AFTER approved_by`);
+      console.log('[migrate] Added project_expenses.approved_at column.');
+    }
+    if (!expenseColumnNames.includes('rejection_reason')) {
+      await connection.query(`ALTER TABLE project_expenses ADD COLUMN rejection_reason VARCHAR(500) NULL AFTER approved_at`);
+      console.log('[migrate] Added project_expenses.rejection_reason column.');
+    }
+
+    const [statusIndexRows] = await connection.query(
+      `SELECT INDEX_NAME FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'project_expenses' AND INDEX_NAME = 'idx_pe_project_status'`,
+      [env.DB_NAME]
+    );
+    if (!statusIndexRows.length) {
+      await connection.query(`ALTER TABLE project_expenses ADD INDEX idx_pe_project_status (project_id, status)`);
+      console.log('[migrate] Added idx_pe_project_status index.');
+    }
+
+    const [approverFkRows] = await connection.query(
+      `SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'project_expenses' AND CONSTRAINT_NAME = 'fk_pe_approver'`,
+      [env.DB_NAME]
+    );
+    if (!approverFkRows.length) {
+      await connection.query(
+        `ALTER TABLE project_expenses ADD CONSTRAINT fk_pe_approver FOREIGN KEY (approved_by) REFERENCES users (id) ON DELETE SET NULL`
+      );
+      console.log('[migrate] Added fk_pe_approver foreign key.');
+    }
+  } catch (err) {
+    console.warn('[migrate] Note on project_expenses approval columns:', err.message);
+  }
+
+  // users.weekly_capacity_hours for Resource Capacity & Workload Heatmap
+  try {
+    const [userCapCol] = await connection.query(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'users' AND COLUMN_NAME = 'weekly_capacity_hours'`,
+      [env.DB_NAME]
+    );
+    if (!userCapCol.length) {
+      await connection.query(
+        `ALTER TABLE users ADD COLUMN weekly_capacity_hours DECIMAL(5,2) NOT NULL DEFAULT 40.00 AFTER bio`
+      );
+      console.log('[migrate] Added users.weekly_capacity_hours column.');
+    }
+  } catch (err) {
+    console.warn('[migrate] Note on users.weekly_capacity_hours check:', err.message);
   }
 
   // Ensure every project has project_statuses rows
