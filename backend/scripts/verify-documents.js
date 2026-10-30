@@ -138,6 +138,7 @@ async function main() {
   } finally {
     server.close();
     await connection.end();
+    process.exit(0);
   }
 }
 
