@@ -33,7 +33,7 @@ import { TaskStatusBadge, PriorityBadge } from '../components/shared/Badges';
 import { Button, IconButton } from '../components/ui/Button';
 import { Card, CardBody, CardHeader } from '../components/ui/Card';
 import { Select } from '../components/ui/Input';
-import { Modal, Drawer } from '../components/ui/Modal';
+import { Modal } from '../components/ui/Modal';
 import { SegmentedControl } from '../components/ui/Tabs';
 import { EmptyState, ErrorState, LoadingState } from '../components/ui/Feedback';
 import { Avatar } from '../components/ui/Avatar';
@@ -317,12 +317,18 @@ export default function Calendar() {
         </CardBody>
       </Card>
 
-      {/* Detail drawer for the selected day */}
-      <Drawer
+      {/* Detail modal for the selected day */}
+      <Modal
         open={Boolean(selectedDay) && !selectedEvent}
         onClose={() => setSelectedDay(null)}
         title={selectedDay ? formatDate(selectedDay, 'EEEE, dd MMMM yyyy') : ''}
         description={`${selectedDayEvents.length} agenda pada tanggal ini`}
+        size="md"
+        footer={
+          <Button variant="secondary" onClick={() => setSelectedDay(null)}>
+            Tutup
+          </Button>
+        }
       >
         {selectedDayEvents.length ? (
           <ul className="space-y-2">
@@ -366,7 +372,7 @@ export default function Calendar() {
             description="Belum ada task atau milestone pada tanggal ini."
           />
         )}
-      </Drawer>
+      </Modal>
 
       {/* Event detail modal */}
       <Modal

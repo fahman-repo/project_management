@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Calendar,
   Layers,
@@ -13,11 +13,13 @@ import { projectApi } from '../../api/project.api';
 import { taskApi } from '../../api/task.api';
 import { GanttChartView } from '../../components/shared/GanttChartView';
 import { TaskDetailDrawer } from '../../components/shared/TaskDetailDrawer';
+import { TaskFormModal } from '../../components/shared/TaskFormModal';
 import { LoadingState, EmptyState } from '../../components/ui/Feedback';
 import { formatCurrency } from '../../utils/formatters';
 import { useAuthStore } from '../../store/authStore';
 
 export function Gantt() {
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const user = useAuthStore((s) => s.user);
 
@@ -54,8 +56,10 @@ export function Gantt() {
     enabled: Boolean(selectedProjectId),
   });
 
-  // Drawer state
+  // Detail modal state
   const [drawerTaskId, setDrawerTaskId] = useState(null);
+  const [editingTask, setEditingTask] = useState(null);
+  const [formOpen, setFormOpen] = useState(false);
 
   const activeProject = projects.find((p) => String(p.id) === String(selectedProjectId));
   const canManage =
@@ -169,12 +173,31 @@ export function Gantt() {
         />
       )}
 
-      {/* Task Detail Drawer */}
+      {/* Task Detail Modal */}
       <TaskDetailDrawer
-        open={Boolean(drawerTaskId)}
+        open={Boolean(drawerTaskId) && !formOpen}
+        variant="modal"
         onClose={() => setDrawerTaskId(null)}
         taskId={drawerTaskId}
         projectId={selectedProjectId}
+        onEdit={(task) => {
+          setEditingTask(task);
+          setFormOpen(true);
+        }}
+      />
+
+      <TaskFormModal
+        open={formOpen}
+        onClose={() => {
+          setFormOpen(false);
+          setEditingTask(null);
+        }}
+        task={editingTask}
+        projectId={selectedProjectId || null}
+        onSaved={() => {
+          queryClient.invalidateQueries({ queryKey: ['gantt', selectedProjectId] });
+          queryClient.invalidateQueries({ queryKey: ['task', drawerTaskId] });
+        }}
       />
     </div>
   );

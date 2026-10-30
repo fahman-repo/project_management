@@ -27,7 +27,7 @@ import { projectApi } from '../../api/project.api';
 import { getErrorMessage } from '../../api/client';
 import { useAuthStore } from '../../store/authStore';
 import { Button, IconButton } from '../ui/Button';
-import { Drawer } from '../ui/Modal';
+import { Drawer, Modal } from '../ui/Modal';
 import { Avatar } from '../ui/Avatar';
 import { ProgressBar } from '../ui/ProgressBar';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -74,8 +74,9 @@ function formatSize(bytes) {
  * @param {boolean} props.open
  * @param {() => void} props.onClose
  * @param {(task:object) => void} props.onEdit opens the edit modal
+ * @param {'drawer'|'modal'} [props.variant='drawer'] whether to render as slide-over drawer or center modal
  */
-export function TaskDetailDrawer({ taskId, open, onClose, onEdit }) {
+export function TaskDetailDrawer({ taskId, open, onClose, onEdit, variant = 'drawer' }) {
   const queryClient = useQueryClient();
   const currentUser = useAuthStore((state) => state.user);
   const fileInputRef = useRef(null);
@@ -347,12 +348,15 @@ export function TaskDetailDrawer({ taskId, open, onClose, onEdit }) {
     addCommentMutation.mutate(body);
   };
 
+  const Container = variant === 'modal' ? Modal : Drawer;
+  const containerProps = variant === 'modal' ? { size: 'lg' } : { width: 'max-w-2xl' };
+
   return (
     <>
-      <Drawer
+      <Container
         open={open}
         onClose={onClose}
-        width="max-w-2xl"
+        {...containerProps}
         title={task?.title || 'Detail Task'}
         description={project ? `${project.code} - ${project.name}` : undefined}
         footer={
@@ -959,7 +963,7 @@ export function TaskDetailDrawer({ taskId, open, onClose, onEdit }) {
             </section>
           </div>
         )}
-      </Drawer>
+      </Container>
 
       <ConfirmDialog
         open={confirmDelete}

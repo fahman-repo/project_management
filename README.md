@@ -50,17 +50,24 @@ npm run dev                      # http://localhost:5173
 Vite memproxy `/api`, `/uploads`, dan `/socket.io` ke backend pada port 5000, sehingga
 tidak diperlukan konfigurasi CORS tambahan saat pengembangan.
 
-## Akun Demo
+## Akun Demo & Kredensial Database
 
-Seluruh akun demo menggunakan password **`Password123!`**
+Seluruh akun pengguna demo pada database menggunakan password default: **`Password123!`**
 
-| Peran | Email |
-|---|---|
-| Administrator | `admin@pm.test` |
-| Manajer | `budi@pm.test` · `siti@pm.test` |
-| Anggota | `andi@pm.test` · `dewi@pm.test` · `rizky@pm.test` · `maya@pm.test` · `fajar@pm.test` |
+| Nama Pengguna | Email | Peran | Jabatan | Password Default |
+|---|---|---|---|---|
+| Administrator | `admin@pm.test` | Administrator (`admin`) | System Administrator | `Password123!` |
+| Budi Santoso | `budi@pm.test` | Manajer (`manager`) | Head of IT | `Password123!` |
+| Siti Rahayu | `siti@pm.test` | Manajer (`manager`) | HR Manager | `Password123!` |
+| Andi Pratama | `andi@pm.test` | Anggota (`member`) | Frontend Developer | `Password123!` |
+| Dewi Lestari | `dewi@pm.test` | Anggota (`member`) | Backend Developer | `Password123!` |
+| Rizky Maulana | `rizky@pm.test` | Anggota (`member`) | UI/UX Designer | `Password123!` |
+| Maya Sari | `maya@pm.test` | Anggota (`member`) | QA Engineer | `Password123!` |
+| Fajar Nugroho | `fajar@pm.test` | Anggota (`member`) | DevOps Engineer | `Password123!` |
 
-Halaman login menyediakan tombol pengisian otomatis untuk ketiga peran tersebut.
+> **Catatan Penggunaan**:
+> - Halaman Login (`/login`) menyediakan panel interaktif **Akun Login & Kredensial DB** yang tersinkronisasi langsung dengan database (`GET /api/v1/auth/demo-accounts`).
+> - Dilengkapi tombol satu-klik **Salin Password**, filter per peran (Admin, Manajer, Anggota), serta auto-fill email & password saat akun diklik.
 
 ## Fitur
 

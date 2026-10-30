@@ -16,6 +16,7 @@ const router = express.Router();
 router.post('/register', validate({ body: registerSchema }), controller.register);
 router.post('/login', validate({ body: loginSchema }), controller.login);
 router.get('/email-check', asyncHandler(controller.checkEmail));
+router.get('/demo-accounts', asyncHandler(controller.getDemoAccounts));
 
 router.use(requireAuth);
 

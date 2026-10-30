@@ -1,6 +1,6 @@
 'use strict';
 
-import { queryOne } from '../config/database';
+import { query, queryOne } from '../config/database';
 import ApiError from '../utils/ApiError';
 import asyncHandler from '../utils/asyncHandler';
 import { sendSuccess } from '../utils/response';
@@ -164,6 +164,28 @@ const checkEmail = asyncHandler(async (req, res) => {
   return sendSuccess(res, { available: !user }, 'Pemeriksaan selesai');
 });
 
+/**
+ * GET /api/v1/auth/demo-accounts
+ * Used by the login page to show active users and credentials.
+ */
+const getDemoAccounts = asyncHandler(async (req, res) => {
+  const accounts = await query(
+    `SELECT id, name, email, role, job_title, avatar
+     FROM users
+     WHERE is_active = 1
+     ORDER BY CASE role WHEN 'admin' THEN 1 WHEN 'manager' THEN 2 ELSE 3 END, id ASC`
+  );
+
+  return sendSuccess(
+    res,
+    {
+      accounts,
+      defaultPassword: 'Password123!',
+    },
+    'Daftar akun demo berhasil diambil'
+  );
+});
+
 export { register };
 export { login };
 export { logout };
@@ -172,6 +194,7 @@ export { changePassword };
 export { updateProfile };
 export { uploadAvatar };
 export { checkEmail };
+export { getDemoAccounts };
 
 export default {
   register,
@@ -181,5 +204,6 @@ export default {
   changePassword,
   updateProfile,
   uploadAvatar,
-  checkEmail
+  checkEmail,
+  getDemoAccounts
 };

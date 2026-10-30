@@ -470,9 +470,10 @@ export default function Kanban() {
         </DndContext>
       )}
 
-      {/* --- Drawer + modal --- */}
+      {/* --- Modals --- */}
       <TaskDetailDrawer
-        open={Boolean(detailTaskId)}
+        open={Boolean(detailTaskId) && !formOpen}
+        variant="modal"
         taskId={detailTaskId}
         onClose={() => setDetailTaskId(null)}
         onEdit={(task) => {

@@ -41,6 +41,11 @@ export const authApi = {
    */
   checkEmail: (email) =>
     api.get('/auth/email-check', { params: { email } }).then((res) => res.data.data),
+
+  /**
+   * Fetch demo accounts and default password from the database.
+   */
+  getDemoAccounts: () => api.get('/auth/demo-accounts').then((res) => res.data.data),
 };
 
 export default authApi;
